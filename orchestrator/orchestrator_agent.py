@@ -1,0 +1,199 @@
+"""OrchestratorAgent — LangChain orchestrator that decomposes tasks and dispatches to Memento-S workers."""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import traceback
+from typing import Any, AsyncGenerator, Mapping, Sequence
+
+from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+logger = logging.getLogger(__name__)
+
+
+class OrchestratorAgent:
+    """
+    LangChain orchestrator agent that decomposes tasks into subtasks
+    and dispatches them to Memento-S workers via MCP.
+
+    Architecture:
+    - Uses LangChain BaseChatModel for LLM interactions
+    - Connects to Memento-S MCP server for parallel task execution
+    - Uses create_agent() to build the agent graph
+    - Supports both streaming and non-streaming execution
+
+    Usage:
+        orchestrator = OrchestratorAgent(model=ChatOpenAI(model="gpt-4o"))
+        await orchestrator.start()
+        result = await orchestrator.run("Build a web scraper for news articles")
+        await orchestrator.close()
+    """
+
+    DEFAULT_COMMAND = sys.executable
+    DEFAULT_ARGS: Sequence[str] = ("orchestrator/mcp_server.py",)
+
+    def __init__(
+        self,
+        *,
+        name: str = "orchestrator",
+        model: BaseChatModel,
+        description: str | None = None,
+        command: str | None = None,
+        args: Sequence[str] | None = None,
+        env: Mapping[str, str] | None = None,
+        system_message: str | None = None,
+    ) -> None:
+        self.name = name
+        self.model = model
+        self._description = description or (
+            "Decomposes complex tasks into subtasks and dispatches "
+            "them to Memento-S worker agents for parallel execution."
+        )
+        self._command = command or self.DEFAULT_COMMAND
+        self._args = list(args) if args is not None else list(self.DEFAULT_ARGS)
+        self._env = dict(os.environ if env is None else env)
+        self._system_message = system_message or self._build_default_system_message()
+        self._mcp_client: MultiServerMCPClient | None = None
+        self._agent_graph: Any = None
+
+    def _build_default_system_message(self) -> str:
+        return """You are an Orchestrator Agent coordinating a pool of Memento-S workers.
+
+## YOUR JOB
+1. Receive a task from the user.
+2. Decompose it into focused, self-contained subtasks.
+3. Call `execute_subtasks` with the list of subtask strings.
+4. Synthesize the worker results into a final response.
+
+## DECOMPOSITION STRATEGY
+- One focused goal per subtask — maximize parallelism
+- Each subtask must be SELF-CONTAINED with full context
+- Workers are STATELESS — never write "use the result from subtask 1"
+- Keep subtasks atomic and bounded
+- If the task has many parts, split into bounded slices
+
+## CRITICAL: Workers are STATELESS
+- Write SELF-CONTAINED descriptions with full details
+- Never write "find details for the above" — workers have no context
+- GOOD: "Read the file /home/user/project/config.py and extract the database URL"
+- BAD: "Read the config file mentioned earlier"
+
+## WORKER CAPABILITIES
+Each worker is a Memento-S agent powered by Agent Skills — capable of handling most tasks
+including file operations, shell commands, web search, package management, and more.
+Workers automatically select the best skill for each subtask and can dynamically
+acquire new skills on demand. Each worker handles complex tasks iteratively.
+Based on this, focus on decomposing the task into clear, self-contained subtasks.
+
+## WORKBOARD (WORKER COORDINATION) — REQUIRED
+When calling execute_subtasks, you MUST always include a `workboard` parameter.
+The workboard is a markdown string that creates a shared file all workers can read and edit.
+Workers use `read_workboard` and `edit_workboard` ops to coordinate in real time.
+
+Always create a workboard that:
+1. Lists every subtask with its index and a status checkbox (e.g. `- [ ] Subtask 1: ...`)
+2. Includes a "Results" section where workers can record their findings
+3. Provides any shared context workers might need
+
+Example workboard format:
+```
+# Task Board
+## Subtasks
+- [ ] 1: Search for X and summarize findings
+- [ ] 2: Search for Y and summarize findings
+## Shared Context
+<any relevant context the workers should know>
+## Results
+(workers will fill this in)
+```
+
+## OUTPUT
+- After receiving worker results, synthesize into a clear final response
+"""
+
+    async def start(self) -> None:
+        """Initialize MCP connection to worker pool and build the agent graph."""
+        env = dict(self._env)
+
+        mcp_servers = {
+            "memento_worker_pool": {
+                "command": self._command,
+                "args": self._args,
+                "env": env,
+                "transport": "stdio",
+            }
+        }
+
+        self._mcp_client = MultiServerMCPClient(mcp_servers)
+        tools = await self._mcp_client.get_tools()
+
+        self._agent_graph = create_agent(
+            model=self.model,
+            tools=tools,
+            system_prompt=self._system_message,
+        )
+
+    async def run(self, query: str | list[dict]) -> dict[str, Any]:
+        """Execute the orchestrator agent and return the complete result."""
+        self._ensure_started()
+
+        if isinstance(query, str):
+            query_preview = query[:200] + "..." if len(query) > 200 else query
+            logger.info(f"[Orchestrator] Query: {query_preview}")
+            messages = [{"role": "user", "content": query}]
+        else:
+            messages = query
+
+        try:
+            result = await self._agent_graph.ainvoke({"messages": messages})
+            output = self._extract_output(result)
+            logger.info(f"[Orchestrator] Result: {output[:300]}...")
+            return {"output": output, "raw": result}
+        except Exception as e:
+            logger.error(f"[Orchestrator] Error: {e}\n{traceback.format_exc()}")
+            raise
+
+    async def stream(
+        self, query: str | list[dict]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Execute the orchestrator agent and stream updates."""
+        self._ensure_started()
+
+        if isinstance(query, str):
+            messages = [{"role": "user", "content": query}]
+        else:
+            messages = query
+
+        async for chunk in self._agent_graph.astream(
+            {"messages": messages},
+            stream_mode="updates",
+            config={"recursion_limit": 50},
+        ):
+            yield chunk
+
+    async def close(self) -> None:
+        """Close MCP connections and cleanup."""
+        self._mcp_client = None
+        self._agent_graph = None
+
+    def _ensure_started(self) -> None:
+        if self._agent_graph is None:
+            raise RuntimeError("OrchestratorAgent not started. Call start() first.")
+
+    @staticmethod
+    def _extract_output(result: Any) -> str:
+        """Best-effort extraction of the final answer from LangChain agent results."""
+        if isinstance(result, dict):
+            messages = result.get("messages")
+            if isinstance(messages, (list, tuple)) and messages:
+                last = messages[-1]
+                content = getattr(last, "content", None)
+                if content:
+                    return str(content)
+            if "output" in result and result["output"]:
+                return str(result["output"])
+        return str(result)
