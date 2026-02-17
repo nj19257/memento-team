@@ -17,6 +17,10 @@ from langchain_openai import ChatOpenAI
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Static, TextArea
+try:
+    from textual.widgets import MarkdownViewer
+except Exception:
+    MarkdownViewer = None  # type: ignore[assignment]
 
 from orchestrator.orchestrator_agent import OrchestratorAgent
 
@@ -42,20 +46,55 @@ class MementoTUI(App):
     }
 
     #left {
-        width: 34;
-        min-width: 30;
+        width: 1fr;
+        min-width: 24;
         padding: 1;
         border: round #666666;
     }
 
     #right {
-        width: 1fr;
+        width: 5fr;
         padding: 1;
         border: round #666666;
     }
 
+    #tab_bar {
+        height: 3;
+        margin-bottom: 1;
+        border-bottom: solid #3a3a3a;
+        padding: 0 1;
+    }
+
+    .tab_btn {
+        margin-right: 0;
+        min-width: 18;
+        border: none;
+        border-top: round #4a4a4a;
+        border-left: round #4a4a4a;
+        border-right: round #4a4a4a;
+        background: #1a1a1a;
+        color: #9f9f9f;
+    }
+
+    .tab_btn.active_tab {
+        background: #262626;
+        color: #f0f0f0;
+        text-style: bold;
+        border-top: round #7a7a7a;
+        border-left: round #7a7a7a;
+        border-right: round #7a7a7a;
+    }
+
+    .tab_btn:focus {
+        background: #262626;
+        color: #f0f0f0;
+        border-top: round #7a7a7a;
+        border-left: round #7a7a7a;
+        border-right: round #7a7a7a;
+    }
+
     #task_input {
-        height: 9;
+        height: 1fr;
         margin-bottom: 1;
     }
 
@@ -63,20 +102,27 @@ class MementoTUI(App):
         margin-bottom: 1;
     }
 
-    #status {
-        height: 3;
-        margin-bottom: 1;
-        border: round #666666;
-        padding: 0 1;
-    }
-
     #workers_table {
         height: 1fr;
     }
 
+    #left_task {
+        height: 1fr;
+    }
+
+    #left_workers {
+        height: 2fr;
+    }
+
     #steps_table {
-        height: 10;
+        height: 1fr;
         margin-bottom: 1;
+    }
+
+    #steps_subtask {
+        margin-bottom: 1;
+        border: round #666666;
+        padding: 0 1;
     }
 
     #workboard {
@@ -84,12 +130,26 @@ class MementoTUI(App):
         margin-bottom: 1;
     }
 
-    #workboard_container {
+    #board_view_bar {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    .subtab_btn {
+        margin-right: 1;
+        min-width: 10;
+    }
+
+    .subtab_btn.active_subtab {
+        text-style: bold;
+    }
+
+    .workboard_container {
         border: round #666666;
     }
 
     #final_output {
-        height: 8;
+        height: 1fr;
         border: round #666666;
         padding: 0 1;
     }
@@ -97,6 +157,10 @@ class MementoTUI(App):
     .section_title {
         margin: 0 0 1 0;
         text-style: bold;
+    }
+
+    .hidden {
+        display: none;
     }
     """
 
@@ -123,30 +187,59 @@ class MementoTUI(App):
         self._session_board_path: Path | None = None
         self._last_task_running_state: bool = False
         self._last_session_file_signature: list[tuple[str, int]] = []
+        self._active_tab: str = "board"
+        self._board_view: str = "raw"
+        self._session_worker_order: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="layout"):
             with Vertical(id="left"):
-                yield Static("Task", classes="section_title")
-                yield TextArea("", id="task_input")
-                yield Button("Run Task", id="run_task", variant="primary")
-                yield Static("Status: initializing", id="status")
-                yield Static("Workers (live)", classes="section_title")
-                yield DataTable(id="workers_table")
+                with Vertical(id="left_task"):
+                    yield Static("Task", classes="section_title")
+                    yield TextArea("", id="task_input")
+                    yield Button("Run Task", id="run_task", variant="primary")
+                with Vertical(id="left_workers"):
+                    yield Static("Workers (live)", classes="section_title")
+                    yield DataTable(id="workers_table")
             with Vertical(id="right"):
-                yield Static("Execution Steps (selected worker)", classes="section_title")
-                yield DataTable(id="steps_table")
-                yield Static("Workboard", classes="section_title")
-                with Vertical(id="workboard_container"):
-                    yield TextArea("(no workboard exists)", id="workboard", read_only=True)
-                yield Static("Final Output", classes="section_title")
-                yield TextArea("", id="final_output", read_only=True)
+                with Horizontal(id="tab_bar"):
+                    yield Button("Workboard", id="tab_board", classes="tab_btn active_tab")
+                    yield Button("Execution Steps", id="tab_steps", classes="tab_btn")
+                    yield Button("Final Output", id="tab_final", classes="tab_btn")
+
+                with Vertical(id="panel_steps", classes="hidden"):
+                    yield Static("Execution Steps (selected worker)", classes="section_title")
+                    yield Static("(no worker selected)", id="steps_worker_row")
+                    yield Static("(select a worker to view its subtask)", id="steps_subtask")
+                    yield DataTable(id="steps_table")
+
+                with Vertical(id="panel_board"):
+                    yield Static("Workboard", classes="section_title")
+                    with Horizontal(id="board_view_bar"):
+                        yield Button("Raw", id="board_raw", classes="subtab_btn active_subtab", variant="primary")
+                        yield Button("Rendered", id="board_rendered", classes="subtab_btn")
+                    with Vertical(id="workboard_raw_panel", classes=""):
+                        with Vertical(classes="workboard_container"):
+                            yield TextArea("(no workboard exists)", id="workboard", read_only=True)
+                    with Vertical(id="workboard_rendered_panel", classes="hidden"):
+                        with Vertical(id="workboard_rendered_container", classes="workboard_container"):
+                            if MarkdownViewer is not None:
+                                yield MarkdownViewer("(no workboard exists)")
+                            else:
+                                yield Static(
+                                    "MarkdownViewer unavailable in current Textual install.",
+                                    id="workboard_rendered_fallback",
+                                )
+
+                with Vertical(id="panel_final", classes="hidden"):
+                    yield Static("Final Output", classes="section_title")
+                    yield TextArea("", id="final_output", read_only=True)
         yield Footer()
 
     async def on_mount(self) -> None:
         workers_table = self.query_one("#workers_table", DataTable)
-        workers_table.add_columns("Worker", "Status", "Timestamp", "Events", "Seconds", "Subtask")
+        workers_table.add_columns("Worker", "Status", "Events", "Seconds", "Timestamp")
         workers_table.cursor_type = "row"
 
         steps_table = self.query_one("#steps_table", DataTable)
@@ -158,6 +251,8 @@ class MementoTUI(App):
         self.set_interval(1.0, self._refresh_workboard)
 
         await self._start_orchestrator()
+        self._set_active_tab("board")
+        self._set_board_view("raw")
         self._refresh_workers()
         self._refresh_workboard()
 
@@ -166,8 +261,6 @@ class MementoTUI(App):
             await self.orchestrator.close()
 
     async def _start_orchestrator(self) -> None:
-        status = self.query_one("#status", Static)
-        status.update("Status: starting orchestrator...")
         try:
             load_dotenv()
             model = ChatOpenAI(
@@ -183,9 +276,9 @@ class MementoTUI(App):
             child_env.setdefault("FASTMCP_QUIET", "1")
             self.orchestrator = OrchestratorAgent(model=model, env=child_env)
             await self.orchestrator.start()
-            status.update("Status: ready | session: (none)")
-        except Exception as exc:
-            status.update(f"Status: failed to start orchestrator: {exc}")
+        except Exception:
+            # Keep UI minimal; runtime errors will surface when running a task.
+            pass
 
     def action_refresh_workers(self) -> None:
         self._refresh_workers(force=True)
@@ -196,6 +289,16 @@ class MementoTUI(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run_task":
             self._trigger_run_task()
+        elif event.button.id == "tab_board":
+            self._set_active_tab("board")
+        elif event.button.id == "tab_steps":
+            self._set_active_tab("steps")
+        elif event.button.id == "tab_final":
+            self._set_active_tab("final")
+        elif event.button.id == "board_raw":
+            self._set_board_view("raw")
+        elif event.button.id == "board_rendered":
+            self._set_board_view("rendered")
 
     def _trigger_run_task(self) -> None:
         if self._task_running:
@@ -204,20 +307,22 @@ class MementoTUI(App):
         task_input = self.query_one("#task_input", TextArea)
         task = task_input.text.strip()
         if not task:
-            self.query_one("#status", Static).update("Status: enter a task first")
             return
 
         asyncio.create_task(self._run_task(task))
 
     async def _run_task(self, task: str) -> None:
         self._task_running = True
-        status = self.query_one("#status", Static)
+        run_btn = self.query_one("#run_task", Button)
+        run_btn.disabled = True
+        run_btn.label = "Task Running"
         output = self.query_one("#final_output", TextArea)
-        output.text = ""
+        output.text = "Task is running. Final output will appear here when execution completes."
 
         if self.orchestrator is None:
-            status.update("Status: orchestrator not available")
             self._task_running = False
+            run_btn.disabled = False
+            run_btn.label = "Run Task"
             return
 
         try:
@@ -229,39 +334,51 @@ class MementoTUI(App):
                 for p in LOGS_DIR.glob("worker-*.jsonl")
             }
             self._current_session_files = []
+            self._session_worker_order = []
             self._selected_worker_path = None
             self._selected_worker_mtime = -1.0
+            self.query_one("#steps_worker_row", Static).update("(no worker selected)")
+            self.query_one("#steps_subtask", Static).update("(select a worker to view its subtask)")
             self.query_one("#steps_table", DataTable).clear(columns=False)
 
-            status.update(f"Status: running task... | session: {self._session_id}")
             result = await self.orchestrator.run(task)
             final = str(result.get("output", "")).strip()
             output.text = final or "(no output)"
-            status.update(f"Status: done | session: {self._session_id}")
+            self._set_active_tab("final")
             self._last_session_id = self._session_id
         except Exception as exc:
-            status.update(f"Status: run failed: {exc}")
+            output.text = f"Run failed: {exc}"
             self._last_session_id = self._session_id
         finally:
             self._task_running = False
+            run_btn.disabled = False
+            run_btn.label = "Run Task"
 
     def _refresh_workers(self, force: bool = False) -> None:
         all_files = sorted(
             LOGS_DIR.glob("worker-*.jsonl"),
             key=lambda p: p.stat().st_mtime,
-            reverse=True,
         )
         self._worker_files = all_files
 
         if self._session_id is None:
-            files: list[Path] = []
+            files_raw: list[Path] = []
         else:
-            files = [
+            files_raw = [
                 p
                 for p in all_files
                 if p.name not in self._session_file_baseline
                 and p.stat().st_mtime >= (self._session_started_at - 1.0)
             ]
+
+        by_name = {p.name: p for p in files_raw}
+        known = set(self._session_worker_order)
+        new_names = [p.name for p in files_raw if p.name not in known]
+        for name in new_names:
+            self._session_worker_order.append(name)
+        self._session_worker_order = [n for n in self._session_worker_order if n in by_name]
+        files = [by_name[n] for n in self._session_worker_order]
+
         file_signature = [
             (p.name, int(p.stat().st_mtime_ns))
             for p in files
@@ -269,6 +386,7 @@ class MementoTUI(App):
         run_state_changed = self._last_task_running_state != self._task_running
         if (
             not force
+            and not self._task_running
             and not run_state_changed
             and file_signature == self._last_session_file_signature
         ):
@@ -280,9 +398,15 @@ class MementoTUI(App):
 
         table = self.query_one("#workers_table", DataTable)
         table.clear(columns=False)
+        selected_name = (
+            self._selected_worker_path.name
+            if self._selected_worker_path is not None
+            else None
+        )
+        selected_row_index: int | None = None
 
         now = time.time()
-        for path in files:
+        for idx, path in enumerate(files):
             header = self._read_header(path)
             worker_label, timestamp = self._worker_and_ts_from_file(path)
             header_status = str(header.get("status", "")).strip().lower()
@@ -292,21 +416,36 @@ class MementoTUI(App):
                 worker_status = "live"
             else:
                 worker_status = "finished"
-            events = header.get("total_events", "?")
-            seconds = header.get("time_taken_seconds", "?")
+            if worker_status == "live":
+                events = self._live_event_count(path)
+                seconds = self._live_elapsed_seconds(header, path, now)
+            else:
+                events = header.get("total_events", "?")
+                seconds = header.get("time_taken_seconds", "?")
             subtask = str(header.get("subtask", ""))
             subtask = self._short(subtask, 70)
             row_key = path.name
             added_key = table.add_row(
                 worker_label,
                 worker_status,
-                timestamp,
                 str(events),
                 str(seconds),
-                subtask,
+                timestamp,
                 key=row_key,
             )
             self._worker_row_key_to_path[added_key] = path
+            if selected_name is not None and path.name == selected_name:
+                selected_row_index = idx
+
+        # Keep highlight on previously selected worker after table refresh.
+        if selected_row_index is not None:
+            try:
+                table.move_cursor(row=selected_row_index, column=0, animate=False)
+            except Exception:
+                try:
+                    table.cursor_coordinate = (selected_row_index, 0)
+                except Exception:
+                    pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         table = event.data_table
@@ -319,7 +458,52 @@ class MementoTUI(App):
 
         self._selected_worker_path = path
         self._selected_worker_mtime = -1.0
+        self.query_one("#steps_worker_row", Static).update(self._format_worker_row(path))
+        header = self._read_header(path)
+        subtask = str(header.get("subtask", "")).strip() or "(subtask unavailable)"
+        self.query_one("#steps_subtask", Static).update(subtask)
+        self._set_active_tab("steps")
         self._load_worker_steps(path)
+
+    def _set_active_tab(self, tab: str) -> None:
+        if tab not in {"board", "steps", "final"}:
+            return
+        self._active_tab = tab
+
+        panel_steps = self.query_one("#panel_steps", Vertical)
+        panel_board = self.query_one("#panel_board", Vertical)
+        panel_final = self.query_one("#panel_final", Vertical)
+
+        tab_board = self.query_one("#tab_board", Button)
+        tab_steps = self.query_one("#tab_steps", Button)
+        tab_final = self.query_one("#tab_final", Button)
+
+        panel_steps.set_class(tab != "steps", "hidden")
+        panel_board.set_class(tab != "board", "hidden")
+        panel_final.set_class(tab != "final", "hidden")
+
+        tab_board.set_class(tab == "board", "active_tab")
+        tab_steps.set_class(tab == "steps", "active_tab")
+        tab_final.set_class(tab == "final", "active_tab")
+
+    def _set_board_view(self, mode: str) -> None:
+        if mode not in {"raw", "rendered"}:
+            return
+        self._board_view = mode
+        raw_panel = self.query_one("#workboard_raw_panel", Vertical)
+        rendered_panel = self.query_one("#workboard_rendered_panel", Vertical)
+        raw_btn = self.query_one("#board_raw", Button)
+        rendered_btn = self.query_one("#board_rendered", Button)
+
+        raw_panel.set_class(mode != "raw", "hidden")
+        rendered_panel.set_class(mode != "rendered", "hidden")
+        raw_btn.set_class(mode == "raw", "active_subtab")
+        rendered_btn.set_class(mode == "rendered", "active_subtab")
+        raw_btn.variant = "primary" if mode == "raw" else "default"
+        rendered_btn.variant = "primary" if mode == "rendered" else "default"
+        if mode == "rendered":
+            seed = self._workboard_last_text or "(no workboard exists)"
+            self._update_rendered_workboard(seed)
 
     def _refresh_selected_worker_steps(self) -> None:
         if self._selected_worker_path is None or not self._selected_worker_path.exists():
@@ -328,6 +512,9 @@ class MementoTUI(App):
         if mtime <= self._selected_worker_mtime:
             return
         self._selected_worker_mtime = mtime
+        self.query_one("#steps_worker_row", Static).update(
+            self._format_worker_row(self._selected_worker_path)
+        )
         self._load_worker_steps(self._selected_worker_path)
 
     def _load_worker_steps(self, path: Path) -> None:
@@ -360,6 +547,7 @@ class MementoTUI(App):
             if text != self._workboard_last_text:
                 self._workboard_last_text = text
                 board_widget.text = text
+                self._update_rendered_workboard(text)
             return
 
         board_path = get_board_path()
@@ -377,6 +565,21 @@ class MementoTUI(App):
         if text != self._workboard_last_text:
             self._workboard_last_text = text
             board_widget.load_text(text)
+            self._update_rendered_workboard(text)
+
+    def _update_rendered_workboard(self, text: str) -> None:
+        if MarkdownViewer is None:
+            fallback = self.query_one("#workboard_rendered_fallback", Static)
+            fallback.update(text)
+            return
+        container = self.query_one("#workboard_rendered_container", Vertical)
+        # Replace rendered widget wholesale to avoid API/version update mismatches.
+        try:
+            for child in list(container.children):
+                child.remove()
+        except Exception:
+            pass
+        container.mount(MarkdownViewer(text))
 
     def _prepare_new_session_board(self, new_session_id: str) -> None:
         """Archive previous board (if any) and start a fresh board for this session."""
@@ -427,6 +630,58 @@ class MementoTUI(App):
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
+
+    @staticmethod
+    def _live_elapsed_seconds(header: dict[str, Any], path: Path, now_ts: float) -> str:
+        """Best-effort elapsed seconds for a live worker."""
+        raw = str(header.get("ts", "")).strip()
+        if raw:
+            try:
+                started = datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                elapsed = max(0.0, now_ts - started.timestamp())
+                return f"{elapsed:.1f}"
+            except Exception:
+                pass
+        try:
+            elapsed = max(0.0, now_ts - path.stat().st_mtime)
+            return f"{elapsed:.1f}"
+        except Exception:
+            return "?"
+
+    @staticmethod
+    def _live_event_count(path: Path) -> int | str:
+        """Count currently written trajectory events (excluding header line)."""
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                lines = sum(1 for line in f if line.strip())
+            return max(0, lines - 1)
+        except Exception:
+            return "?"
+
+    def _format_worker_row(self, path: Path) -> str:
+        """Format worker summary matching the workers list row fields."""
+        header = self._read_header(path)
+        now = time.time()
+        worker_label, timestamp = self._worker_and_ts_from_file(path)
+        header_status = str(header.get("status", "")).strip().lower()
+        if header_status in {"live", "finished", "failed"}:
+            worker_status = header_status
+        elif self._task_running and (now - path.stat().st_mtime) < 2.0:
+            worker_status = "live"
+        else:
+            worker_status = "finished"
+
+        if worker_status == "live":
+            events = self._live_event_count(path)
+            seconds = self._live_elapsed_seconds(header, path, now)
+        else:
+            events = header.get("total_events", "?")
+            seconds = header.get("time_taken_seconds", "?")
+
+        return (
+            f"Worker: {worker_label} | Status: {worker_status} | "
+            f"Events: {events} | Seconds: {seconds} | Timestamp: {timestamp}"
+        )
 
     @staticmethod
     def _read_events(path: Path) -> list[dict[str, Any]]:
