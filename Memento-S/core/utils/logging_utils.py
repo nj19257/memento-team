@@ -26,10 +26,11 @@ _EXEC_LOG_LOCK: threading.Lock = threading.Lock()
 _thread_local = threading.local()
 
 
-def start_trajectory(worker_id: str) -> None:
+def start_trajectory(worker_id: str, event_sink: Any | None = None) -> None:
     """Begin collecting log events for the current thread."""
     _thread_local.worker_id = worker_id
     _thread_local.events = []
+    _thread_local.event_sink = event_sink
 
 
 def collect_trajectory() -> list[dict]:
@@ -37,6 +38,7 @@ def collect_trajectory() -> list[dict]:
     events = getattr(_thread_local, "events", [])
     _thread_local.events = []
     _thread_local.worker_id = None
+    _thread_local.event_sink = None
     return events
 
 
@@ -130,6 +132,12 @@ def log_event(event: str, **fields: Any) -> None:
             traj_record = dict(record)
             traj_record["worker_id"] = worker_id
             traj_events.append(traj_record)
+            sink = getattr(_thread_local, "event_sink", None)
+            if callable(sink):
+                try:
+                    sink(traj_record)
+                except Exception:
+                    pass
 
     # File logging (original behaviour)
     if not EXEC_LOG_ENABLED:

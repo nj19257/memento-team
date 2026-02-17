@@ -5,6 +5,7 @@ import os
 import asyncio
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -139,11 +140,34 @@ TRAJECTORY_LOG_DIR = Path(os.getenv(
     "TRAJECTORY_LOG_DIR",
     str(Path(__file__).resolve().parent.parent / "logs"),
 ))
+_TRAJECTORY_FILE_LOCK = threading.Lock()
 
 
-def _execute_single_subtask_with_trajectory(subtask: str, idx: int) -> tuple[str, list[dict]]:
+def _append_live_trajectory_event(path: Path, event: dict) -> None:
+    """Append one JSON event to a live worker trajectory file."""
+    try:
+        line = json.dumps(event, ensure_ascii=False)
+        with _TRAJECTORY_FILE_LOCK:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        # Best-effort only; final save still writes full trajectory.
+        pass
+
+
+def _execute_single_subtask_with_trajectory(
+    subtask: str,
+    idx: int,
+    live_path: Path | None = None,
+) -> tuple[str, list[dict]]:
     """Wrap _execute_single_subtask with per-worker trajectory collection."""
-    start_trajectory(f"worker-{idx}")
+    if live_path is not None:
+        start_trajectory(
+            f"worker-{idx}",
+            event_sink=lambda e, p=live_path: _append_live_trajectory_event(p, e),
+        )
+    else:
+        start_trajectory(f"worker-{idx}")
     result = _execute_single_subtask(subtask)
     trajectory = collect_trajectory()
     return result, trajectory
@@ -277,7 +301,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                 try:
                     async with _semaphore:
                         result, trajectory = await asyncio.to_thread(
-                            _execute_single_subtask_with_trajectory, subtask, idx
+                            _execute_single_subtask_with_trajectory, subtask, idx, live_traj_path
                         )
                     elapsed = round(time.perf_counter() - start_time, 2)
                     logger.info(

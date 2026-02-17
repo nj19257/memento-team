@@ -334,11 +334,24 @@ class MementoTUI(App):
         table = self.query_one("#steps_table", DataTable)
         table.clear(columns=False)
 
+        row_count = 0
         for event in self._read_events(path):
             ts = self._event_time(event)
             name = str(event.get("event", ""))
             detail = self._event_detail(event)
             table.add_row(ts, name, detail)
+            row_count += 1
+
+        # Auto-follow newest events: keep viewport pinned to the last row.
+        if row_count > 0:
+            last_row = row_count - 1
+            try:
+                table.move_cursor(row=last_row, column=0, animate=False)
+            except Exception:
+                try:
+                    table.cursor_coordinate = (last_row, 0)
+                except Exception:
+                    pass
 
     def _refresh_workboard(self) -> None:
         board_widget = self.query_one("#workboard", TextArea)
