@@ -9,6 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+QUIET_STDERR = _env_truthy("MCP_QUIET_STDERR")
+if QUIET_STDERR:
+    # Suppress third-party startup banners/logs that can corrupt TUI rendering.
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 # Set up imports from Memento-S directory
 _MEMENTO_S_DIR = str(Path(__file__).resolve().parent.parent / "Memento-S")
 sys.path.insert(0, _MEMENTO_S_DIR)
@@ -32,6 +42,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 5
+
+
+def _stderr_print(*args: Any, **kwargs: Any) -> None:
+    """Print to stderr unless MCP quiet mode is enabled."""
+    if QUIET_STDERR:
+        return
+    kwargs.setdefault("file", sys.stderr)
+    print(*args, **kwargs)
 
 mcp = FastMCP("MementoSWorkerPool")
 
@@ -131,8 +149,8 @@ def _execute_single_subtask_with_trajectory(subtask: str, idx: int) -> tuple[str
     return result, trajectory
 
 
-def _save_trajectory(idx: int, subtask: str, trajectory: list[dict], result: str, elapsed: float) -> Path | None:
-    """Write a worker's trajectory to a JSONL file in TRAJECTORY_LOG_DIR."""
+def _create_live_trajectory(idx: int, subtask: str) -> Path | None:
+    """Create a per-worker trajectory file immediately with status=live."""
     try:
         TRAJECTORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -143,6 +161,43 @@ def _save_trajectory(idx: int, subtask: str, trajectory: list[dict], result: str
                 "type": "header",
                 "worker_index": idx,
                 "subtask": subtask,
+                "status": "live",
+                "result_preview": "",
+                "time_taken_seconds": 0.0,
+                "total_events": 0,
+                "ts": ts,
+            }
+            f.write(json.dumps(header, ensure_ascii=False) + "\n")
+        return path
+    except Exception as exc:
+        _stderr_print(f"[warn] failed to create live trajectory for worker {idx}: {exc}")
+        return None
+
+
+def _save_trajectory(
+    idx: int,
+    subtask: str,
+    trajectory: list[dict],
+    result: str,
+    elapsed: float,
+    *,
+    status: str = "finished",
+    path: Path | None = None,
+) -> Path | None:
+    """Write final trajectory state to JSONL file (finished/failed)."""
+    try:
+        TRAJECTORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if path is None:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            filename = f"worker-{idx}-{ts}.jsonl"
+            path = TRAJECTORY_LOG_DIR / filename
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        with path.open("w", encoding="utf-8") as f:
+            header = {
+                "type": "header",
+                "worker_index": idx,
+                "subtask": subtask,
+                "status": status,
                 "result_preview": result[:500],
                 "time_taken_seconds": elapsed,
                 "total_events": len(trajectory),
@@ -153,7 +208,7 @@ def _save_trajectory(idx: int, subtask: str, trajectory: list[dict], result: str
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")
         return path
     except Exception as exc:
-        print(f"[warn] failed to save trajectory for worker {idx}: {exc}", file=sys.stderr)
+        _stderr_print(f"[warn] failed to save trajectory for worker {idx}: {exc}")
         return None
 
 
@@ -165,42 +220,41 @@ def _short(text: str, max_len: int = 80) -> str:
 
 def _print_trajectory(idx: int, events: list[dict]) -> None:
     """Print a concise per-worker trajectory to stderr."""
-    print(f"\n{'─' * 60}", file=sys.stderr)
-    print(f"  Worker {idx + 1} Trajectory", file=sys.stderr)
-    print(f"{'─' * 60}", file=sys.stderr)
+    _stderr_print(f"\n{'─' * 60}")
+    _stderr_print(f"  Worker {idx + 1} Trajectory")
+    _stderr_print(f"{'─' * 60}")
     for e in events:
         event = e.get("event", "?")
         ts = e.get("ts", "")
         if event == "run_one_skill_loop_start":
-            print(f"  [{ts}] START  skill={e.get('skill_name')}  task={_short(e.get('user_text', ''))}", file=sys.stderr)
+            _stderr_print(f"  [{ts}] START  skill={e.get('skill_name')}  task={_short(e.get('user_text', ''))}")
         elif event == "run_one_skill_loop_round_plan":
             plan = e.get("plan", {})
             ops = plan.get("ops", []) if isinstance(plan, dict) else []
             op_types = [str(o.get("type", "?")) for o in ops if isinstance(o, dict)]
-            print(f"  [{ts}] PLAN   round={e.get('round')}  ops={op_types}", file=sys.stderr)
+            _stderr_print(f"  [{ts}] PLAN   round={e.get('round')}  ops={op_types}")
         elif event == "execute_skill_plan_output":
             result = str(e.get("result", ""))[:120]
-            print(f"  [{ts}] EXEC   skill={e.get('skill_name')}  result={result}", file=sys.stderr)
+            _stderr_print(f"  [{ts}] EXEC   skill={e.get('skill_name')}  result={result}")
         elif event == "run_one_skill_loop_continue":
-            print(f"  [{ts}] CONTINUE  round={e.get('round')}", file=sys.stderr)
+            _stderr_print(f"  [{ts}] CONTINUE  round={e.get('round')}")
         elif event == "run_one_skill_loop_end":
-            print(f"  [{ts}] END    round={e.get('round')}  mode={e.get('mode')}", file=sys.stderr)
-    print(f"{'─' * 60}\n", file=sys.stderr)
+            _stderr_print(f"  [{ts}] END    round={e.get('round')}  mode={e.get('mode')}")
+    _stderr_print(f"{'─' * 60}\n")
 
 
 @mcp.tool(description=EXECUTE_SUBTASKS_DESCRIPTION)
 async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
     """Execute subtasks in parallel on Memento-S agent workers."""
     try:
-        print(f"\n{'=' * 80}", file=sys.stderr)
-        print(
-            f"[MementoSWorkerPool] execute_subtasks called with {len(subtasks)} subtask(s)",
-            file=sys.stderr,
+        _stderr_print(f"\n{'=' * 80}")
+        _stderr_print(
+            f"[MementoSWorkerPool] execute_subtasks called with {len(subtasks)} subtask(s)"
         )
-        print(f"{'=' * 80}", file=sys.stderr)
+        _stderr_print(f"{'=' * 80}")
         for i, st in enumerate(subtasks):
-            print(f"  Subtask {i + 1}: {st}", file=sys.stderr)
-        print(file=sys.stderr)
+            _stderr_print(f"  Subtask {i + 1}: {st}")
+        _stderr_print("")
 
         if not subtasks or len(subtasks) < 1:
             raise ValueError("Must provide at least 1 subtask")
@@ -212,11 +266,12 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
         # Write workboard if provided (workers discover it on their own)
         if workboard and workboard.strip():
             board_path = write_board(workboard)
-            print(f"  [Workboard] Created at {board_path}", file=sys.stderr)
+            _stderr_print(f"  [Workboard] Created at {board_path}")
 
         async def run_one(subtask: str, idx: int) -> Dict[str, Any]:
             max_retries = 3
             start_time = time.perf_counter()
+            live_traj_path = _create_live_trajectory(idx, subtask)
 
             for attempt in range(max_retries):
                 try:
@@ -229,9 +284,17 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
                     )
                     _print_trajectory(idx, trajectory)
-                    traj_path = _save_trajectory(idx, subtask, trajectory, result, elapsed)
+                    traj_path = _save_trajectory(
+                        idx,
+                        subtask,
+                        trajectory,
+                        result,
+                        elapsed,
+                        status="finished",
+                        path=live_traj_path,
+                    )
                     if traj_path:
-                        print(f"  [Worker {idx + 1}] Trajectory saved → {traj_path}", file=sys.stderr)
+                        _stderr_print(f"  [Worker {idx + 1}] Trajectory saved → {traj_path}")
                     return {
                         "subtask_index": idx,
                         "subtask": subtask,
@@ -251,6 +314,15 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         logger.error(
                             f"[MementoSWorkerPool] Subtask [{idx}] failed after {max_retries} attempts ({elapsed}s): {error_msg}"
                         )
+                        _save_trajectory(
+                            idx,
+                            subtask,
+                            [],
+                            error_msg,
+                            elapsed,
+                            status="failed",
+                            path=live_traj_path,
+                        )
                         raise RuntimeError(error_msg) from e
 
         tasks = [run_one(st, i) for i, st in enumerate(subtasks)]
@@ -265,17 +337,17 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                 successful.append(result)
 
         # Summary
-        print(f"\n{'=' * 80}", file=sys.stderr)
-        print(f"[MementoSWorkerPool] All subtasks completed", file=sys.stderr)
-        print(f"  Successful: {len(successful)}/{len(subtasks)}", file=sys.stderr)
-        print(f"  Failed: {len(failed)}/{len(subtasks)}", file=sys.stderr)
-        print(f"{'=' * 80}\n", file=sys.stderr)
+        _stderr_print(f"\n{'=' * 80}")
+        _stderr_print(f"[MementoSWorkerPool] All subtasks completed")
+        _stderr_print(f"  Successful: {len(successful)}/{len(subtasks)}")
+        _stderr_print(f"  Failed: {len(failed)}/{len(subtasks)}")
+        _stderr_print(f"{'=' * 80}\n")
 
         for r in successful:
             idx = r.get("subtask_index", "?")
             t = r.get("time_taken_seconds", 0)
             preview = r.get("result", "")[:200]
-            print(f"  Result {idx + 1} ({t}s): {preview}", file=sys.stderr)
+            _stderr_print(f"  Result {idx + 1} ({t}s): {preview}")
 
         return {
             "results": successful,

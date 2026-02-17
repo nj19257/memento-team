@@ -30,14 +30,14 @@ Orchestrator Agent (LangChain)
 
 | File | Purpose |
 |---|---|
-| `main.py` | Entry point — initializes LLM, starts orchestrator, runs interactive loop |
-| `orchestrator/orchestrator_agent.py` | LangChain-based orchestrator that decomposes tasks and dispatches to workers via MCP |
-| `Memento-S/mcp_server.py` | FastMCP server exposing `execute_subtasks` tool — runs up to 5 workers in parallel |
-| `Memento-S/agent.py` | Worker agent facade — re-exports all core modules, provides CLI REPL |
-| `Memento-S/core/config.py` | Centralized configuration from environment variables |
-| `Memento-S/core/llm.py` | LLM client (OpenRouter / Anthropic-compatible endpoints) |
-| `Memento-S/core/router.py` | Skill routing — semantic pre-filter + LLM-based skill selection |
-| `Memento-S/core/skill_engine/` | Skill planning, execution, catalog management, dynamic fetch |
+| [main.py](main.py) | Entry point — initializes LLM, starts orchestrator, runs interactive loop |
+| [orchestrator/orchestrator_agent.py](orchestrator/orchestrator_agent.py) | LangChain-based orchestrator that decomposes tasks and dispatches to workers via MCP |
+| [Memento-S/mcp_server.py](Memento-S/mcp_server.py) | FastMCP server exposing `execute_subtasks` tool — runs up to 5 workers in parallel |
+| [Memento-S/agent.py](Memento-S/agent.py) | Worker agent facade — re-exports all core modules, provides CLI REPL |
+| [Memento-S/core/config.py](Memento-S/core/config.py) | Centralized configuration from environment variables |
+| [Memento-S/core/llm.py](Memento-S/core/llm.py) | LLM client (OpenRouter / Anthropic-compatible endpoints) |
+| [Memento-S/core/router.py](Memento-S/core/router.py) | Skill routing — semantic pre-filter + LLM-based skill selection |
+| [Memento-S/core/skill_engine/](Memento-S/core/skill_engine/) | Skill planning, execution, catalog management, dynamic fetch |
 
 ## Built-in Skills
 
@@ -68,6 +68,7 @@ Workers automatically select the best skill for each subtask via semantic routin
 
 - Python 3.11+
 - API keys for LLM provider and (optionally) SerpAPI
+- Textual-compatible terminal (for TUI mode)
 
 ### Install Dependencies
 
@@ -104,9 +105,31 @@ python main.py
 
 Enter a task at the prompt. The orchestrator will decompose it and dispatch to workers automatically.
 
+### Run Textual TUI
+
+```bash
+python tui_app.py
+```
+
+TUI capabilities:
+
+- Submit tasks directly from the interface (`Ctrl+Enter` or **Run Task**)
+- Session-scoped worker list from `logs/worker-*.jsonl` (current task only)
+- Per-worker status label (`live` / `finished`)
+- Click any worker row to inspect execution steps/events
+- Live workboard view from `Memento-S/workspace/.workboard.md` (or `WORKSPACE_DIR`)
+- Workboard history is preserved per session as `.workboard-<session_id>.md`
+- Final orchestrator output panel
+
+TUI controls:
+
+- `Ctrl+Enter`: Run task
+- `r`: Refresh worker list
+- `q`: Quit
+
 ## Configuration
 
-All configuration is centralized in `Memento-S/core/config.py` and read from environment variables. Key settings:
+All configuration is centralized in [Memento-S/core/config.py](Memento-S/core/config.py) and read from environment variables. Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -118,29 +141,31 @@ All configuration is centralized in `Memento-S/core/config.py` and read from env
 | `SEMANTIC_ROUTER_TOP_K` | `4` | Number of candidate skills for LLM routing |
 | `SKILL_DYNAMIC_FETCH_ENABLED` | `true` | Auto-fetch missing skills from catalog |
 | `DEBUG` | `false` | Enable debug logging |
+| `WORKSPACE_DIR` | `Memento-S/workspace` | Workboard location shown in TUI |
 
 ## Project Structure
 
 ```
 memento-team/
-├── main.py                          # Entry point
-├── orchestrator/
-│   └── orchestrator_agent.py        # LangChain orchestrator agent
-├── Memento-S/
-│   ├── mcp_server.py                # FastMCP server (execute_subtasks)
-│   ├── agent.py                     # Worker facade + CLI REPL
-│   ├── core/
-│   │   ├── config.py                # Configuration & constants
-│   │   ├── llm.py                   # LLM client
-│   │   ├── router.py                # Skill routing logic
-│   │   ├── utils/                   # JSON, path, logging utilities
-│   │   └── skill_engine/            # Skill planning, execution, catalog
-│   ├── skills/                      # Built-in skills
-│   │   ├── filesystem/
-│   │   ├── terminal/
-│   │   ├── web-search/
-│   │   ├── uv-pip-install/
-│   │   └── skill-creator/
-│   └── cli/                         # CLI REPL with slash commands
-└── multiagent-workflow.md           # Detailed architecture notes
+├── [main.py](main.py)                          # Entry point
+├── [tui_app.py](tui_app.py)                    # Textual TUI (task runner + live worker inspector)
+├── [orchestrator/](orchestrator/) 
+│   └── [orchestrator_agent.py](orchestrator/orchestrator_agent.py)        # LangChain orchestrator agent
+├── [Memento-S/](Memento-S/)
+│   ├── [mcp_server.py](Memento-S/mcp_server.py)                # FastMCP server (execute_subtasks)
+│   ├── [agent.py](Memento-S/agent.py)                     # Worker facade + CLI REPL
+│   ├── [core/](Memento-S/core/)
+│   │   ├── [config.py](Memento-S/core/config.py)                # Configuration & constants
+│   │   ├── [llm.py](Memento-S/core/llm.py)                   # LLM client
+│   │   ├── [router.py](Memento-S/core/router.py)                # Skill routing logic
+│   │   ├── [utils/](Memento-S/core/utils/)                   # JSON, path, logging utilities
+│   │   └── [skill_engine/](Memento-S/core/skill_engine/)            # Skill planning, execution, catalog
+│   ├── [skills/](Memento-S/skills/)                      # Built-in skills
+│   │   ├── [filesystem/](Memento-S/skills/filesystem/)
+│   │   ├── [terminal/](Memento-S/skills/terminal/)
+│   │   ├── [web-search/](Memento-S/skills/web-search/)
+│   │   ├── [uv-pip-install/](Memento-S/skills/uv-pip-install/)
+│   │   └── [skill-creator/](Memento-S/skills/skill-creator/)
+│   └── [cli/](Memento-S/cli/)                         # CLI REPL with slash commands
+└── [multiagent-workflow.md](multiagent-workflow.md)           # Detailed architecture notes
 ```

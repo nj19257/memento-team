@@ -30,5 +30,8 @@ anyio
 # Dynamic CLI input/completion
 prompt_toolkit
 
+# TUI
+textual
+
 # Progress bar
 tqdm

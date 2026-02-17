@@ -22,6 +22,7 @@ dependencies = [
     "camel-ai",
     "nltk",
     "prompt_toolkit",
+    "textual",
     "tqdm",
 ]
 
