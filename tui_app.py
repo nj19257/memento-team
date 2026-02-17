@@ -14,6 +14,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Static, TextArea
@@ -73,12 +74,12 @@ class MementoTUI(App):
         border-left: round #4a4a4a;
         border-right: round #4a4a4a;
         background: #1a1a1a;
-        color: #9f9f9f;
+        color: #a8b4c7;
     }
 
     .tab_btn.active_tab {
         background: #262626;
-        color: #f0f0f0;
+        color: #d9e7ff;
         text-style: bold;
         border-top: round #7a7a7a;
         border-left: round #7a7a7a;
@@ -87,7 +88,7 @@ class MementoTUI(App):
 
     .tab_btn:focus {
         background: #262626;
-        color: #f0f0f0;
+        color: #d9e7ff;
         border-top: round #7a7a7a;
         border-left: round #7a7a7a;
         border-right: round #7a7a7a;
@@ -96,14 +97,26 @@ class MementoTUI(App):
     #task_input {
         height: 1fr;
         margin-bottom: 1;
+        color: #dfe8f5;
     }
 
     #run_task {
         margin-bottom: 1;
     }
 
+    Button.-primary {
+        background: #2f4f6f;
+        color: #f0f0f0;
+        border: round #4e6a86;
+    }
+
+    Button.-primary:hover {
+        background: #3a5f84;
+    }
+
     #workers_table {
         height: 1fr;
+        color: #d6e4f4;
     }
 
     #left_task {
@@ -117,17 +130,25 @@ class MementoTUI(App):
     #steps_table {
         height: 1fr;
         margin-bottom: 1;
+        color: #d6e4f4;
     }
 
     #steps_subtask {
         margin-bottom: 1;
         border: round #666666;
         padding: 0 1;
+        color: #dce8be;
+    }
+
+    #steps_worker_row {
+        color: #b8ddff;
+        margin-bottom: 1;
     }
 
     #workboard {
         height: 1fr;
         margin-bottom: 1;
+        color: #f0f0f0;
     }
 
     #board_view_bar {
@@ -138,6 +159,7 @@ class MementoTUI(App):
     .subtab_btn {
         margin-right: 1;
         min-width: 10;
+        color: #d9e7ff;
     }
 
     .subtab_btn.active_subtab {
@@ -152,11 +174,33 @@ class MementoTUI(App):
         height: 1fr;
         border: round #666666;
         padding: 0 1;
+        color: #f3e2b1;
     }
 
     .section_title {
         margin: 0 0 1 0;
         text-style: bold;
+        color: #f2c57a;
+    }
+
+    #title_task {
+        color: #f0be70;
+    }
+
+    #title_workers {
+        color: #82d2ff;
+    }
+
+    #title_steps {
+        color: #9ec7ff;
+    }
+
+    #title_workboard {
+        color: #9ec7ff;
+    }
+
+    #title_final {
+        color: #f1d18a;
     }
 
     .hidden {
@@ -196,11 +240,11 @@ class MementoTUI(App):
         with Horizontal(id="layout"):
             with Vertical(id="left"):
                 with Vertical(id="left_task"):
-                    yield Static("Task", classes="section_title")
+                    yield Static("Task", id="title_task", classes="section_title")
                     yield TextArea("", id="task_input")
                     yield Button("Run Task", id="run_task", variant="primary")
                 with Vertical(id="left_workers"):
-                    yield Static("Workers (live)", classes="section_title")
+                    yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
             with Vertical(id="right"):
                 with Horizontal(id="tab_bar"):
@@ -209,13 +253,13 @@ class MementoTUI(App):
                     yield Button("Final Output", id="tab_final", classes="tab_btn")
 
                 with Vertical(id="panel_steps", classes="hidden"):
-                    yield Static("Execution Steps (selected worker)", classes="section_title")
+                    yield Static("Execution Steps (selected worker)", id="title_steps", classes="section_title")
                     yield Static("(no worker selected)", id="steps_worker_row")
                     yield Static("(select a worker to view its subtask)", id="steps_subtask")
                     yield DataTable(id="steps_table")
 
                 with Vertical(id="panel_board"):
-                    yield Static("Workboard", classes="section_title")
+                    yield Static("Workboard", id="title_workboard", classes="section_title")
                     with Horizontal(id="board_view_bar"):
                         yield Button("Raw", id="board_raw", classes="subtab_btn active_subtab", variant="primary")
                         yield Button("Rendered", id="board_rendered", classes="subtab_btn")
@@ -233,7 +277,7 @@ class MementoTUI(App):
                                 )
 
                 with Vertical(id="panel_final", classes="hidden"):
-                    yield Static("Final Output", classes="section_title")
+                    yield Static("Final Output", id="title_final", classes="section_title")
                     yield TextArea("", id="final_output", read_only=True)
         yield Footer()
 
@@ -422,12 +466,18 @@ class MementoTUI(App):
             else:
                 events = header.get("total_events", "?")
                 seconds = header.get("time_taken_seconds", "?")
+            if worker_status == "live":
+                status_cell: str | Text = Text("running", style="bold #61d47a")
+            elif worker_status == "finished":
+                status_cell = Text("finished", style="bold #ef6b73")
+            else:
+                status_cell = Text(worker_status, style="bold #ef6b73")
             subtask = str(header.get("subtask", ""))
             subtask = self._short(subtask, 70)
             row_key = path.name
             added_key = table.add_row(
                 worker_label,
-                worker_status,
+                status_cell,
                 str(events),
                 str(seconds),
                 timestamp,
@@ -658,7 +708,7 @@ class MementoTUI(App):
         except Exception:
             return "?"
 
-    def _format_worker_row(self, path: Path) -> str:
+    def _format_worker_row(self, path: Path) -> Text:
         """Format worker summary matching the workers list row fields."""
         header = self._read_header(path)
         now = time.time()
@@ -670,6 +720,7 @@ class MementoTUI(App):
             worker_status = "live"
         else:
             worker_status = "finished"
+        status_label = "running" if worker_status == "live" else worker_status
 
         if worker_status == "live":
             events = self._live_event_count(path)
@@ -678,9 +729,22 @@ class MementoTUI(App):
             events = header.get("total_events", "?")
             seconds = header.get("time_taken_seconds", "?")
 
-        return (
-            f"Worker: {worker_label} | Status: {worker_status} | "
-            f"Events: {events} | Seconds: {seconds} | Timestamp: {timestamp}"
+        status_style = "#61d47a" if status_label == "running" else "#ef6b73"
+        return Text.assemble(
+            ("Worker: ", "bold #9ec7ff"),
+            (worker_label, "#d6e4f4"),
+            (" | ", "#9aa4b2"),
+            ("Status: ", "bold #9ec7ff"),
+            (status_label, f"bold {status_style}"),
+            (" | ", "#9aa4b2"),
+            ("Events: ", "bold #9ec7ff"),
+            (str(events), "#d6e4f4"),
+            (" | ", "#9aa4b2"),
+            ("Seconds: ", "bold #9ec7ff"),
+            (str(seconds), "#d6e4f4"),
+            (" | ", "#9aa4b2"),
+            ("Timestamp: ", "bold #9ec7ff"),
+            (timestamp, "#d6e4f4"),
         )
 
     @staticmethod
