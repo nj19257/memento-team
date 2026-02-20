@@ -8,8 +8,6 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-import certifi
-
 from core.config import (
     LLM_API,
     MODEL,
@@ -55,8 +53,7 @@ def _http_request_with_retry(
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-            with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
             last_exc = None
             break

@@ -2,7 +2,6 @@
 
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 
@@ -26,13 +25,20 @@ from core.skill_engine.skill_catalog import (
     parse_available_skills,
     build_available_skills_xml,
     write_visible_skills_block,
-    ensure_router_embedding_prewarm,
-    select_router_top_skills,
+    select_semantic_top_skills,
     _load_router_catalog_from_jsonl,
     _merge_skill_catalog,
     build_router_step_note,
     derive_semantic_goal,
 )
+
+
+def explicit_skill_match(user_text: str, skill_names: list[str]) -> str | None:
+    """Match user text against known skill names using word-boundary regex."""
+    for name in skill_names:
+        if re.search(rf"\b{re.escape(name)}\b", user_text, re.IGNORECASE):
+            return name
+    return None
 
 
 def _normalize_router_decision(obj: Any) -> dict:
@@ -122,7 +128,6 @@ def route_skill(
     allow_new_skills: bool = True,
     context: list[str] | None = None,
     routing_goal: str | None = None,
-    debug: bool = False,
 ) -> dict:
     """Route user request to skill(s). Can be called iteratively for dynamic workflows.
 
@@ -135,15 +140,6 @@ def route_skill(
         routing_goal: Goal text used for semantic candidate retrieval before LLM routing
     """
     goal_text = str(routing_goal or user_text or "").strip() or user_text
-    debug_enabled = bool(debug) or DEBUG
-    t_route = time.perf_counter()
-
-    def _debug_timing(label: str, started_at: float) -> None:
-        if not debug_enabled:
-            return
-        elapsed = max(0.0, time.perf_counter() - float(started_at))
-        print(f"[debug][timing] {label}: {elapsed:.3f}s")
-
     log_event(
         "route_skill_input",
         user_text=user_text,
@@ -159,7 +155,6 @@ def route_skill(
     semantic_catalog_skills = skills
     catalog_loaded_ok = False
     catalog_source = "runtime"
-    t_catalog = time.perf_counter()
 
     # ------------------------------------------------------------------
     # 1. Load extended catalog from JSONL (preferred) or MD fallback
@@ -168,7 +163,7 @@ def route_skill(
         try:
             catalog_skills, _by_name = _load_router_catalog_from_jsonl(SEMANTIC_ROUTER_CATALOG_JSONL)
             if catalog_skills:
-                semantic_catalog_skills = catalog_skills
+                semantic_catalog_skills = _merge_skill_catalog(catalog_skills, skills)
                 catalog_loaded_ok = True
                 catalog_source = "jsonl"
             elif SEMANTIC_ROUTER_DEBUG:
@@ -185,7 +180,7 @@ def route_skill(
             catalog_xml = load_available_skills_block_from(SEMANTIC_ROUTER_CATALOG_MD)
             catalog_skills = parse_available_skills(catalog_xml)
             if catalog_skills:
-                semantic_catalog_skills = catalog_skills
+                semantic_catalog_skills = _merge_skill_catalog(catalog_skills, skills)
                 catalog_loaded_ok = True
                 catalog_source = "xml"
             elif SEMANTIC_ROUTER_DEBUG:
@@ -193,26 +188,17 @@ def route_skill(
         except Exception as exc:
             if SEMANTIC_ROUTER_DEBUG:
                 print(f"[semantic-router] failed to load catalog {SEMANTIC_ROUTER_CATALOG_MD!r}: {exc}")
-    _debug_timing("route.catalog_load", t_catalog)
 
     # ------------------------------------------------------------------
-    # 2. Semantic top-K selection
+    # 2. Semantic top-K selection (TF-IDF)
     # ------------------------------------------------------------------
     if SEMANTIC_ROUTER_ENABLED and semantic_catalog_skills:
-        t_semantic = time.perf_counter()
-        ensure_router_embedding_prewarm(semantic_catalog_skills)
-        _debug_timing("route.embedding_prewarm_trigger", t_semantic)
-
-    if SEMANTIC_ROUTER_ENABLED and semantic_catalog_skills:
-        t_semantic = time.perf_counter()
-        selected = select_router_top_skills(
-            goal_text,
-            semantic_catalog_skills,
-            top_k=SEMANTIC_ROUTER_TOP_K,
+        selected = select_semantic_top_skills(
+            goal_text, semantic_catalog_skills, top_k=SEMANTIC_ROUTER_TOP_K
         )
         if selected:
-            visible_skills = _merge_skill_catalog(selected, skills)
-            visible_skills_xml = build_available_skills_xml(visible_skills)
+            visible_skills = selected
+            visible_skills_xml = build_available_skills_xml(selected)
             if SEMANTIC_ROUTER_WRITE_VISIBLE_AGENTS:
                 if catalog_source == "xml" and SEMANTIC_ROUTER_CATALOG_MD and catalog_loaded_ok:
                     same_file = False
@@ -234,36 +220,39 @@ def route_skill(
                         "catalog source is not AGENTS-style XML"
                     )
             if SEMANTIC_ROUTER_DEBUG:
-                names = ", ".join(str(s.get("name") or "").strip() for s in visible_skills)
-                print(f"[semantic-router] goal={goal_text!r} visible={len(visible_skills)} skills: {names}")
+                names = ", ".join(str(s.get("name") or "").strip() for s in selected)
+                print(f"[semantic-router] goal={goal_text!r} visible={len(selected)} skills: {names}")
             log_event(
                 "semantic_router_selected",
                 goal_text=goal_text,
-                selected_skills=[str(s.get("name") or "").strip() for s in visible_skills],
-                selected_count=len(visible_skills),
+                selected_skills=[str(s.get("name") or "").strip() for s in selected],
+                selected_count=len(selected),
                 catalog_count=len(semantic_catalog_skills),
                 catalog_source=catalog_source,
             )
-        _debug_timing("route.semantic_select", t_semantic)
-    if debug_enabled:
-        visible_names = [
-            str(s.get("name") or "").strip()
-            for s in visible_skills
-            if isinstance(s, dict) and str(s.get("name") or "").strip()
-        ]
-        preview_n = 40
-        preview = visible_names[:preview_n]
-        more = len(visible_names) - len(preview)
-        suffix = f", ... (+{more} more)" if more > 0 else ""
-        print(
-            f"[debug] router visible_skills({len(visible_names)}) "
-            f"[catalog_source={catalog_source}]: "
-            + ", ".join(preview)
-            + suffix
-        )
 
     # ------------------------------------------------------------------
-    # 3. Build prompt for LLM-based routing
+    # 3. Explicit skill-name match (first call only, no context)
+    # ------------------------------------------------------------------
+    if not context:
+        skill_names = [
+            str(s.get("name") or "").strip()
+            for s in semantic_catalog_skills
+            if isinstance(s, dict) and str(s.get("name") or "").strip()
+        ]
+        explicit = explicit_skill_match(user_text, skill_names)
+        if explicit:
+            decision = {
+                "action": "next_step",
+                "name": explicit,
+                "user": user_text,
+                "reason": "explicit_match",
+            }
+            log_event("route_skill_output", decision=decision, mode="explicit_match")
+            return decision
+
+    # ------------------------------------------------------------------
+    # 4. Build prompt for LLM-based routing
     # ------------------------------------------------------------------
     if allow_new_skills:
         rules = (
@@ -333,39 +322,30 @@ User request:
     )
 
     # ------------------------------------------------------------------
-    # 4. LLM call for routing decision
+    # 5. LLM call for routing decision
     # ------------------------------------------------------------------
-    t_llm = time.perf_counter()
     output = openrouter_messages(
         "Return only valid JSON.",
         [{"role": "user", "content": prompt}],
     )
-    _debug_timing("route.llm_decision_call", t_llm)
     log_event("route_raw_output", raw_output=output)
 
     # ------------------------------------------------------------------
-    # 5. Parse and normalize the response
+    # 6. Parse and normalize the response
     # ------------------------------------------------------------------
     try:
-        t_parse = time.perf_counter()
         decision = _normalize_router_decision(json.loads(output))
-        _debug_timing("route.parse_json", t_parse)
         log_event("route_skill_output", decision=decision, mode="json")
-        _debug_timing("route.total", t_route)
         return decision
     except json.JSONDecodeError:
-        t_parse = time.perf_counter()
         parsed = parse_json_output(output)
-        _debug_timing("route.parse_fallback", t_parse)
         if parsed:
             decision = _normalize_router_decision(parsed)
             log_event("route_skill_output", decision=decision, mode="parsed_json_fragment")
-            _debug_timing("route.total", t_route)
             return decision
         preview = (output or "").strip().replace("\n", "\\n")
         if DEBUG:
             print(f"[debug] route_skill invalid JSON output preview={preview[:500]!r}")
         decision = {"action": "none", "reason": "router_invalid_json"}
         log_event("route_skill_output", decision=decision, mode="invalid_json")
-        _debug_timing("route.total(invalid_json)", t_route)
         return decision

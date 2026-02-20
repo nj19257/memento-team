@@ -23,6 +23,7 @@ dependencies = [
     "nltk",
     "prompt_toolkit",
     "tqdm",
+    "pygame>=2.6.1",
 ]
 
 [project.scripts]

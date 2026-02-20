@@ -25,7 +25,7 @@ from core.config import (
     WEB_OP_TYPES,
     WORKBOARD_OP_TYPES,
 )
-from core.workboard import read_board, edit_board, append_board
+from core.workboard import read_board
 from core.utils.logging_utils import log_event
 from core.utils.path_utils import (
     _find_venv,
@@ -528,7 +528,12 @@ def _execute_filesystem_op(
 
 
 def _execute_filesystem_ops(plan: dict) -> str:
-    """Execute all filesystem ops in a plan."""
+    """Execute all filesystem ops in a plan.
+
+    Ops that are not filesystem operations (e.g. ``run_command``) are
+    forwarded to the bridge dispatcher so they reach the correct executor
+    instead of being silently dropped.
+    """
     ops = plan.get("ops", [])
     if not isinstance(ops, list) or not ops:
         return "ERR: no ops provided"
@@ -544,14 +549,17 @@ def _execute_filesystem_ops(plan: dict) -> str:
             results.append("SKIP: op is not a dict")
             continue
         try:
-            results.append(
-                _execute_filesystem_op(
-                    dict(op),
-                    base_dir,
-                    skill_dir=skill_dir,
-                    prefer_skill_paths=prefer_skill_paths,
-                )
+            op_dict = dict(op)
+            result = _execute_filesystem_op(
+                op_dict,
+                base_dir,
+                skill_dir=skill_dir,
+                prefer_skill_paths=prefer_skill_paths,
             )
+            # Forward non-filesystem ops to the bridge dispatcher
+            if result.startswith("unknown op_type:"):
+                result = _dispatch_bridge_op(op_dict, plan, "filesystem")
+            results.append(result)
         except Exception as exc:
             op_type = str(op.get("type") or "unknown")
             results.append(f"{op_type} ERR: {exc}")
@@ -950,7 +958,7 @@ def _execute_uv_pip_ops(plan: dict) -> str:
 # ===================================================================
 
 def _execute_workboard_ops(plan: dict) -> str:
-    """Execute workboard operations (read_workboard, edit_workboard)."""
+    """Execute workboard operations (read_workboard only; edit_workboard is blocked)."""
     ops = plan.get("ops", [])
     results = []
     for op in ops:
@@ -958,13 +966,7 @@ def _execute_workboard_ops(plan: dict) -> str:
         if op_type == "read_workboard":
             results.append(read_board())
         elif op_type == "edit_workboard":
-            append_text = op.get("append")
-            if append_text:
-                results.append(append_board(str(append_text)))
-            else:
-                old_text = str(op.get("old_text", ""))
-                new_text = str(op.get("new_text", ""))
-                results.append(edit_board(old_text, new_text))
+            results.append("edit_workboard BLOCKED: workboard is managed by orchestrator")
     return "\n\n".join(results) if results else "OK"
 
 
@@ -1163,11 +1165,13 @@ def execute_skill_plan(skill_name: str, plan: dict) -> str:
         log_event("execute_skill_plan_output", skill_name=skill_name, result=result)
         return result
 
-    # ── Pre-extract workboard ops (new tools, orthogonal to any skill) ──
-    workboard_results: list[str] = []
+    # ── Separate workboard ops from skill ops ──
+    # Workboard ops are executed AFTER skill ops so that if a skill op fails
+    # (e.g. run_command returns an error), the LLM's premature workboard
+    # edits (claiming success) do not get committed before we know the result.
+    wb_ops: list = []
     if skill != "workboard":
         remaining_ops = []
-        wb_ops = []
         for op in ops:
             op_type_raw = (
                 str(op.get("type") or "").strip().lower()
@@ -1177,14 +1181,12 @@ def execute_skill_plan(skill_name: str, plan: dict) -> str:
                 wb_ops.append(op)
             else:
                 remaining_ops.append(op)
-        if wb_ops:
-            workboard_results.append(_execute_workboard_ops({"ops": wb_ops}))
         ops = remaining_ops
         normalized["ops"] = ops
         if not ops:
-            # Workboard-only round: signal CONTINUE so the multi-turn loop
-            # keeps going and the worker can do its actual task / edit the board.
-            result = "CONTINUE:" + "\n".join(workboard_results)
+            # Workboard-only round: execute immediately and return.
+            workboard_result = _execute_workboard_ops({"ops": wb_ops}) if wb_ops else ""
+            result = workboard_result or "OK"
             log_event("execute_skill_plan_output", skill_name=skill_name, result=result)
             return result
 
@@ -1214,12 +1216,15 @@ def execute_skill_plan(skill_name: str, plan: dict) -> str:
             outputs.append(f"[op#{idx}:{op_type}]\n{out}")
         skill_result = "\n\n".join(outputs) if outputs else "ERR: no executable ops"
 
+    # ── Execute deferred workboard ops AFTER skill ops ──
+    workboard_results: list[str] = []
+    if wb_ops:
+        workboard_results.append(_execute_workboard_ops({"ops": wb_ops}))
+
     # ── Merge workboard + skill results ──
-    # When workboard ops were involved, prefix with CONTINUE: so the
-    # multi-turn loop keeps going — the worker still needs to edit the
-    # workboard to record its results before finishing.
+    # Workboard results are appended as context but don't force continuation.
     if workboard_results:
-        result = "CONTINUE:" + "\n\n".join(workboard_results) + "\n\n" + skill_result
+        result = "\n\n".join(workboard_results) + "\n\n" + skill_result
     else:
         result = skill_result
     log_event("execute_skill_plan_output", skill_name=skill_name, result=result)

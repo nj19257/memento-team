@@ -6,7 +6,6 @@ import json
 import re
 
 from core.config import BUILTIN_BRIDGE_SKILLS, SKILL_LOOP_FEEDBACK_CHARS
-from core.workboard import read_board
 from core.utils.logging_utils import log_event
 from core.utils.path_utils import _truncate, _truncate_middle
 from core.skill_engine.planning import ask_for_plan
@@ -52,7 +51,6 @@ def run_one_skill_loop(user_text: str, skill_name: str, max_rounds: int = 50) ->
     ]
 
     last_outputs: list[str] = []
-    _workboard_continue_used = False
     for round_no in range(1, max_rounds + 1):
         log_event("run_one_skill_loop_round_start", skill_name=skill_name, round=round_no)
         plan = ask_for_plan(user_text, skill_md, skill_name, messages=messages)
@@ -108,12 +106,6 @@ def run_one_skill_loop(user_text: str, skill_name: str, max_rounds: int = 50) ->
                 content = result_str[9:].strip()
                 last_outputs.append(content)
                 feedback = "Previous ops output:\n" + _truncate_middle(content, SKILL_LOOP_FEEDBACK_CHARS)
-                if "workboard" in content.lower() or "## Subtasks" in content or "- [ ]" in content:
-                    feedback += (
-                        "\n\nReminder: After completing your task, update the workboard — "
-                        'e.g. {"type": "edit_workboard", "old_text": "- [ ] your task", '
-                        '"new_text": "- [x] your task"} or use "append" to add results.'
-                    )
                 messages.append({"role": "user", "content": feedback})
                 continue
 
@@ -141,35 +133,6 @@ def run_one_skill_loop(user_text: str, skill_name: str, max_rounds: int = 50) ->
                     }
                 )
                 continue
-
-            # -- workboard continuation safety net --
-            # If a workboard exists and this round didn't edit it,
-            # force exactly one more round for workboard editing.
-            if not _workboard_continue_used:
-                board_content = read_board()
-                if (
-                    board_content
-                    and board_content != "(no workboard exists)"
-                    and "edit_workboard" not in result_str
-                ):
-                    _workboard_continue_used = True
-                    log_event(
-                        "run_one_skill_loop_workboard_continue",
-                        skill_name=skill_name,
-                        round=round_no,
-                    )
-                    feedback = (
-                        "Previous ops output:\n"
-                        + _truncate_middle(result_str, SKILL_LOOP_FEEDBACK_CHARS)
-                        + "\n\nIMPORTANT: A shared workboard exists. You MUST now update it "
-                        "to record your results and mark your subtask as done. "
-                        "Return a plan with edit_workboard ops.\n\n"
-                        "Current workboard:\n"
-                        f"```markdown\n{board_content}\n```"
-                    )
-                    messages.append({"role": "user", "content": feedback})
-                    last_outputs.append(result_str)
-                    continue
 
             # -- done --
             log_event("run_one_skill_loop_end", skill_name=skill_name, round=round_no, result=result_str, mode="ops_result")
@@ -244,12 +207,6 @@ def run_skill_once_with_plan(
                 out = result_str[9:].strip()
                 last_outputs.append(out)
                 feedback = "Previous ops output:\n" + _truncate_middle(out, SKILL_LOOP_FEEDBACK_CHARS)
-                if "workboard" in out.lower() or "## Subtasks" in out or "- [ ]" in out:
-                    feedback += (
-                        "\n\nReminder: After completing your task, update the workboard — "
-                        'e.g. {"type": "edit_workboard", "old_text": "- [ ] your task", '
-                        '"new_text": "- [x] your task"} or use "append" to add results.'
-                    )
                 messages.append({"role": "user", "content": feedback})
                 continue
 

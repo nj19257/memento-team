@@ -69,16 +69,7 @@ CONFIG_KEY_ALIASES: dict[str, str] = {
     "site_url": "OPENROUTER_SITE_URL",
     "app_name": "OPENROUTER_APP_NAME",
     "serpapi": "SERPAPI_API_KEY",
-    "router_method": "SEMANTIC_ROUTER_METHOD",
     "router_top_k": "SEMANTIC_ROUTER_TOP_K",
-    "router_qwen_model": "SEMANTIC_ROUTER_QWEN_MODEL_PATH",
-    "router_qwen_tokenizer": "SEMANTIC_ROUTER_QWEN_TOKENIZER_PATH",
-    "router_memento_model": "SEMANTIC_ROUTER_MEMENTO_QWEN_MODEL_PATH",
-    "router_memento_tokenizer": "SEMANTIC_ROUTER_MEMENTO_QWEN_TOKENIZER_PATH",
-    "router_embed_batch": "SEMANTIC_ROUTER_EMBED_BATCH_SIZE",
-    "router_embed_max_len": "SEMANTIC_ROUTER_EMBED_MAX_LENGTH",
-    "router_embed_cache": "SEMANTIC_ROUTER_EMBED_CACHE_DIR",
-    "router_embed_prewarm": "SEMANTIC_ROUTER_EMBED_PREWARM",
 }
 CONFIG_KEYS: tuple[str, ...] = (
     "LLM_API",
@@ -95,16 +86,7 @@ CONFIG_KEYS: tuple[str, ...] = (
     "OPENROUTER_SITE_URL",
     "OPENROUTER_APP_NAME",
     "SERPAPI_API_KEY",
-    "SEMANTIC_ROUTER_METHOD",
     "SEMANTIC_ROUTER_TOP_K",
-    "SEMANTIC_ROUTER_QWEN_MODEL_PATH",
-    "SEMANTIC_ROUTER_QWEN_TOKENIZER_PATH",
-    "SEMANTIC_ROUTER_MEMENTO_QWEN_MODEL_PATH",
-    "SEMANTIC_ROUTER_MEMENTO_QWEN_TOKENIZER_PATH",
-    "SEMANTIC_ROUTER_EMBED_BATCH_SIZE",
-    "SEMANTIC_ROUTER_EMBED_MAX_LENGTH",
-    "SEMANTIC_ROUTER_EMBED_CACHE_DIR",
-    "SEMANTIC_ROUTER_EMBED_PREWARM",
 )
 CONFIG_SECRET_KEYS = {"OPENROUTER_API_KEY", "SERPAPI_API_KEY", "OPENAI_API_KEY"}
 CONFIG_ATTR_OVERRIDES = {"OPENROUTER_MODEL": "MODEL"}
@@ -533,21 +515,7 @@ def _print_cloud_skills(query: str, *, top_k: int = 5) -> None:
 
 
 def _resolve_prewarm_methods(raw: str) -> tuple[str, ...]:
-    token = str(raw or "").strip().lower()
-    if token in {"", "auto", "router", "current"}:
-        method = str(os.getenv("SEMANTIC_ROUTER_METHOD") or "bm25").strip().lower()
-        if method in {"qwen", "qwen3", "qwen_embedding", "qwen3_embedding"}:
-            return ("qwen_embedding",)
-        if method in {"memento", "memento_qwen", "memento-qwen", "memento_qwen_embedding"}:
-            return ("memento_qwen_embedding",)
-        return ()
-
-    if token in {"qwen", "qwen3", "qwen_embedding", "qwen3_embedding"}:
-        return ("qwen_embedding",)
-    if token in {"memento", "memento_qwen", "memento-qwen", "memento_qwen_embedding"}:
-        return ("memento_qwen_embedding",)
-    if token in {"all", "both", "embedding", "embeddings"}:
-        return ("qwen_embedding", "memento_qwen_embedding")
+    # Embedding-based routing has been removed; only TF-IDF is used.
     return ()
 
 
@@ -596,108 +564,9 @@ def _run_router_prewarm(
     raw_args: str = "",
     debug: bool = False,
 ) -> None:
-    methods = _resolve_prewarm_methods(raw_args)
-    if not methods:
-        active = str(os.getenv("SEMANTIC_ROUTER_METHOD") or "bm25").strip().lower()
-        if str(raw_args or "").strip():
-            print(
-                "Usage: /prewarm [auto|qwen|memento|all] "
-                f"(invalid method: {raw_args!r})\n"
-            )
-        else:
-            print(
-                f"Prewarm skipped: SEMANTIC_ROUTER_METHOD={active!r} "
-                "does not use embedding router.\n"
-            )
-        return
-
-    try:
-        from core.skill_engine.skill_catalog import (
-            precompute_router_embedding_cache,
-            select_embedding_top_skills,
-        )
-    except Exception as exc:
-        print(f"Prewarm failed: cannot import router embedding modules ({exc}).\n")
-        return
-
-    try:
-        runner.reload_skills_metadata()
-    except Exception:
-        pass
-
-    semantic_catalog_skills, catalog_source = _build_semantic_catalog_skills(runner)
-    if not semantic_catalog_skills:
-        print("Prewarm skipped: no catalog skills available.\n")
-        return
-
-    total_stages = 2 + len(methods)
-    stage_idx = 0
-    progress_bar = None
-
-    try:
-        from tqdm import tqdm
-
-        progress_bar = tqdm(total=total_stages, desc="router-prewarm", unit="stage")
-    except Exception:
-        progress_bar = None
-
-    def _stage(label: str) -> None:
-        nonlocal stage_idx
-        stage_idx += 1
-        if progress_bar is not None:
-            progress_bar.set_postfix_str(label)
-            progress_bar.update(1)
-        else:
-            print(f"[prewarm] {stage_idx}/{total_stages}: {label}")
-
-    print(
-        f"Prewarm start: methods={', '.join(methods)} "
-        f"catalog={catalog_source} skills={len(semantic_catalog_skills)}"
-    )
-    _stage("catalog-ready")
-
-    t_cache = time.perf_counter()
-    results = precompute_router_embedding_cache(
-        semantic_catalog_skills,
-        methods=methods,
-        show_progress=True,
-    )
-    _stage("doc-cache")
-    cache_elapsed = time.perf_counter() - t_cache
-
-    warm_query = "__router_prewarm_probe__"
-    warmup_times: list[tuple[str, float]] = []
-    for method in methods:
-        t_warm = time.perf_counter()
-        try:
-            _ = select_embedding_top_skills(
-                warm_query,
-                semantic_catalog_skills,
-                method=method,
-                top_k=1,
-            )
-            warmup_times.append((method, time.perf_counter() - t_warm))
-        except Exception:
-            warmup_times.append((method, -1.0))
-        _stage(f"{method}-query")
-
-    if progress_bar is not None:
-        try:
-            progress_bar.close()
-        except Exception:
-            pass
-
-    print(f"Prewarm done in {cache_elapsed:.2f}s (doc-cache stage).")
-    for method, status in results:
-        print(f"- {method}: {status}")
-    for method, sec in warmup_times:
-        if sec >= 0:
-            print(f"- {method}: query warmup {sec:.3f}s")
-        else:
-            print(f"- {method}: query warmup failed")
-    if debug:
-        print("[debug] prewarm note: offline catalog embedding is reused when cache hits.")
-    print()
+    # Embedding-based routing has been removed; only TF-IDF is used.
+    # TF-IDF builds its index on-demand and needs no prewarming.
+    print("Prewarm not needed: router uses TF-IDF (no embedding models to warm up).\n")
 
 
 def _parse_env_assignment_line(line: str) -> tuple[str, str] | None:

@@ -195,7 +195,7 @@ from core.skill_engine.skill_executor import (  # noqa: F401
 # ---------------------------------------------------------------------------
 # Re-exports from router
 # ---------------------------------------------------------------------------
-from core.router import route_skill  # noqa: F401
+from core.router import route_skill, explicit_skill_match  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Re-exports from skill_runner

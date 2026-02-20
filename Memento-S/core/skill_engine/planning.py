@@ -41,15 +41,8 @@ def ask_for_plan(
         "call_skill, run_command/shell, filesystem ops (read_file/write_file/edit_file/replace_text/append_file/"
         "list_directory/directory_tree/create_directory/mkdir/move_file/copy_file/delete_file/file_info/"
         "search_files/file_exists), web ops (web_search/search/google_search/fetch/fetch_url/fetch_markdown), "
-        "uv ops (check/install/list), and workboard ops (read_workboard/edit_workboard). "
+        "and uv ops (check/install/list). "
         "\n\n"
-        "## Shared Workboard\n"
-        "A shared workboard at workspace/.workboard.md is available for coordinating with parallel workers. "
-        "You have two workboard tools you can include in ANY ops array alongside other ops:\n"
-        '- READ:  {"type": "read_workboard"}\n'
-        '- EDIT:  {"type": "edit_workboard", "old_text": "- [ ] 1: ...", "new_text": "- [x] 1: Done"}\n'
-        '- APPEND: {"type": "edit_workboard", "append": "## Results\\nFindings here..."}\n'
-        "When a workboard exists: read it first, do your task, then edit it to mark your subtask done and record results.\n\n"
         "For call_skill include 'skill' and 'plan' (or 'ops'). "
         "For bundled skill resources, commands may use relative paths like scripts/... or references/...; "
         "the runtime resolves them against the active skill directory. "

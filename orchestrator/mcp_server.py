@@ -23,15 +23,17 @@ from agent import (
     parse_available_skills,
     has_local_skill_dir,
     ensure_skill_available,
+    CLI_CREATE_ON_MISS,
+    create_skill_on_miss,
 )
-from core.workboard import write_board, read_board
+from core.workboard import write_board, check_off_item, append_result
 from core.utils.logging_utils import start_trajectory, collect_trajectory
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-MAX_POOL_SIZE = 5
+MAX_POOL_SIZE = 10
 
 mcp = FastMCP("MementoSWorkerPool")
 
@@ -48,6 +50,7 @@ CAPABILITIES:
 - Workers can dynamically acquire new skills on demand for specialized tasks
 - Each worker handles complex tasks iteratively through multi-round execution
 - Workers are STATELESS and ISOLATED — cannot see other workers' results
+- Workers can run shell commands for code validation (python -c "import ast; ast.parse(...)", python script.py, pytest)
 
 SUBTASK DESIGN RULES:
 1. SELF-CONTAINED: Each subtask must be fully independent with complete context
@@ -96,22 +99,30 @@ def _execute_single_subtask(subtask: str) -> str:
             if not ok:
                 return f"Error: skill {skill_name!r} not found. {fetch_msg}"
 
-        # Enrich subtask with workboard context for the execution loop
-        execution_text = subtask
-        board_content = read_board()
-        if board_content and board_content != "(no workboard exists)":
-            execution_text = (
-                f"{subtask}\n\n"
-                "## Active Workboard\n"
-                "A shared workboard exists with the following content. "
-                "After completing your primary task, you MUST update the workboard "
-                "to mark your subtask as done and record your results.\n\n"
-                f"```markdown\n{board_content}\n```\n\n"
-                "Include edit_workboard ops in your plan to update it."
-            )
-        return run_one_skill_loop(execution_text, skill_name)
-    else:
-        return decision.get("reason", "No action taken.")
+        return run_one_skill_loop(subtask, skill_name)
+
+    # Self-evolve: create a new skill on the fly when no skill matches
+    if action == "none" and CLI_CREATE_ON_MISS:
+        available_skill_names_list = sorted(
+            {
+                str(s.get("name") or "").strip()
+                for s in skills
+                if isinstance(s, dict) and str(s.get("name") or "").strip()
+            }
+        )
+        created, created_skill_name, create_report = create_skill_on_miss(
+            subtask,
+            router_reason=str(decision.get("reason") or "").strip() or None,
+            available_skill_names=available_skill_names_list,
+        )
+        logger.info(
+            f"[Worker] create_on_miss: created={created}, skill={created_skill_name}, report={create_report[:200]}"
+        )
+        if created and isinstance(created_skill_name, str) and created_skill_name.strip():
+            skill_name = created_skill_name.strip()
+            return run_one_skill_loop(subtask, skill_name)
+
+    return decision.get("reason", "No action taken.")
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +239,10 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                     logger.info(
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
                     )
+                    # Auto-check-off workboard item and record result (1-indexed)
+                    check_off_item(idx + 1)
+                    summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
+                    append_result(idx + 1, summary)
                     _print_trajectory(idx, trajectory)
                     traj_path = _save_trajectory(idx, subtask, trajectory, result, elapsed)
                     if traj_path:
@@ -292,6 +307,56 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             "failed": [{"error": f"{type(e).__name__}: {e}"}],
             "subtasks_count": len(subtasks) if subtasks else 0,
         }
+
+
+RUN_COMMAND_DESCRIPTION = """
+Run a shell command directly and return the full stdout + stderr.
+Use this for verification: run the project's entry point and check for errors.
+The command runs inside the Memento-S workspace directory by default.
+
+Args:
+  command: The shell command to execute (e.g. "python -m snake_game.main")
+  working_dir: Working directory relative to workspace (default: workspace root)
+  timeout: Max seconds to wait (default: 30)
+"""
+
+
+@mcp.tool(description=RUN_COMMAND_DESCRIPTION)
+async def run_command(command: str, working_dir: str = "", timeout: int = 30) -> dict:
+    """Run a shell command and return the output."""
+    import subprocess as _sp
+
+    workspace = Path(_MEMENTO_S_DIR) / "workspace"
+    if working_dir:
+        cwd = workspace / working_dir
+    else:
+        cwd = workspace
+
+    if not cwd.exists():
+        return {"exit_code": -1, "stdout": "", "stderr": f"Directory not found: {cwd}"}
+
+    print(f"[run_command] {command}  (cwd={cwd})", file=sys.stderr)
+    try:
+        proc = _sp.run(
+            command,
+            shell=True,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        print(f"[run_command] exit={proc.returncode} stdout={stdout[:200]}", file=sys.stderr)
+        return {
+            "exit_code": proc.returncode,
+            "stdout": stdout[:5000],
+            "stderr": stderr[:5000],
+        }
+    except _sp.TimeoutExpired:
+        return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
+    except Exception as exc:
+        return {"exit_code": -1, "stdout": "", "stderr": str(exc)}
 
 
 if __name__ == "__main__":
