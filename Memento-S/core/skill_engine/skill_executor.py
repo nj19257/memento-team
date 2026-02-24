@@ -25,7 +25,7 @@ from core.config import (
     WEB_OP_TYPES,
     WORKBOARD_OP_TYPES,
 )
-from core.workboard import read_board
+from core.workboard import read_board, edit_board, append_board, is_orchestrator_mode
 from core.utils.logging_utils import log_event
 from core.utils.path_utils import (
     _find_venv,
@@ -527,6 +527,12 @@ def _execute_filesystem_op(
     return f"unknown op_type: {op_type}"
 
 
+_FILESYSTEM_READ_ONLY_OPS = {
+    "read_file", "list_directory", "directory_tree",
+    "file_info", "search_files", "file_exists",
+}
+
+
 def _execute_filesystem_ops(plan: dict) -> str:
     """Execute all filesystem ops in a plan.
 
@@ -563,7 +569,18 @@ def _execute_filesystem_ops(plan: dict) -> str:
         except Exception as exc:
             op_type = str(op.get("type") or "unknown")
             results.append(f"{op_type} ERR: {exc}")
-    return "\n".join(results) if results else "OK"
+    result = "\n".join(results) if results else "OK"
+
+    # Read-only ops are intermediate — signal the skill loop to continue
+    # so the LLM gets a chance to act on the content (e.g. write_file).
+    all_read_only = ops and all(
+        str(op.get("type") or "").strip().lower() in _FILESYSTEM_READ_ONLY_OPS
+        for op in ops if isinstance(op, dict)
+    )
+    if all_read_only:
+        return "CONTINUE:" + result
+
+    return result
 
 
 # ===================================================================
@@ -966,7 +983,16 @@ def _execute_workboard_ops(plan: dict) -> str:
         if op_type == "read_workboard":
             results.append(read_board())
         elif op_type == "edit_workboard":
-            results.append("edit_workboard BLOCKED: workboard is managed by orchestrator")
+            if is_orchestrator_mode():
+                results.append("edit_workboard BLOCKED: workboard writes are disabled during task execution")
+                continue
+            append_text = op.get("append")
+            if append_text:
+                results.append(append_board(str(append_text)))
+            else:
+                old_text = str(op.get("old_text", ""))
+                new_text = str(op.get("new_text", ""))
+                results.append(edit_board(old_text, new_text))
     return "\n\n".join(results) if results else "OK"
 
 

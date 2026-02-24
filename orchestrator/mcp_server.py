@@ -14,6 +14,34 @@ _MEMENTO_S_DIR = str(Path(__file__).resolve().parent.parent / "Memento-S")
 sys.path.insert(0, _MEMENTO_S_DIR)
 os.chdir(_MEMENTO_S_DIR)
 
+# ── Redirect print() → stderr BEFORE any library imports ──
+# MCP stdio transport reserves stdout exclusively for JSON-RPC messages.
+# Any stray print() or logging output on stdout corrupts the protocol.
+#
+# MCP's stdio_server() reads sys.stdout.buffer to get the raw binary stream
+# for JSON-RPC.  We replace sys.stdout with a wrapper that sends text
+# writes (print, logging) to stderr while preserving .buffer for MCP.
+
+
+class _McpSafeStdout:
+    """Redirect print()/write() to stderr; keep .buffer for MCP JSON-RPC."""
+
+    def __init__(self, real_stdout, stderr):
+        self.buffer = real_stdout.buffer
+        self._stderr = stderr
+
+    def write(self, s):
+        return self._stderr.write(s)
+
+    def flush(self):
+        self._stderr.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stderr, name)
+
+
+sys.stdout = _McpSafeStdout(sys.stdout, sys.stderr)
+
 from fastmcp import FastMCP
 
 from agent import (
@@ -26,11 +54,19 @@ from agent import (
     CLI_CREATE_ON_MISS,
     create_skill_on_miss,
 )
-from core.workboard import write_board, check_off_item, append_result
+from core.workboard import (
+    write_board,
+    read_board,
+    set_orchestrator_mode,
+    check_off_item,
+    append_result,
+)
 from core.utils.logging_utils import start_trajectory, collect_trajectory
 
 import logging
 
+# Force all loggers to write to stderr (prevents stdout pollution)
+logging.basicConfig(stream=sys.stderr, force=True)
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 10
@@ -38,14 +74,15 @@ MAX_POOL_SIZE = 10
 mcp = FastMCP("MementoSWorkerPool")
 
 _semaphore = asyncio.Semaphore(MAX_POOL_SIZE)
+_workboard_update_lock = asyncio.Lock()
 
 EXECUTE_SUBTASKS_DESCRIPTION = f"""
 Execute 1-{MAX_POOL_SIZE} independent subtasks in parallel using Memento-S agent workers.
 
-CRITICAL: Maximum {MAX_POOL_SIZE} subtasks per call. Split larger batches into multiple calls.
+CRITICAL: Maximum {MAX_POOL_SIZE} subtasks per call. For larger tasks, call this tool multiple times.
 
 CAPABILITIES:
-- Each worker is a Memento-S agent powered by Agent Skills — capable of handling most tasks
+- Each worker is a Memento-S agent powered by Agent Skills
 - Workers automatically select the best skill for each subtask via semantic routing
 - Workers can dynamically acquire new skills on demand for specialized tasks
 - Each worker handles complex tasks iteratively through multi-round execution
@@ -60,13 +97,18 @@ SUBTASK DESIGN RULES:
 3. NATURAL LANGUAGE: Write clear directives
 4. ATOMIC: One focused task per subtask
 
+MULTI-ROUND USAGE:
+You can call this tool multiple times. For example:
+  Round 1: Implement features in parallel
+  Round 2: Fix issues found during verification
+
 Args:
   subtasks: List[str]
     List of 1 to {MAX_POOL_SIZE} fully self-contained task descriptions.
-  workboard: str (RECOMMENDED — always provide)
+  workboard: str (RECOMMENDED)
     Markdown content for a shared workboard file that lists the subtasks
-    and provides a Results section for workers to fill in. Workers can
-    read and edit it during execution via read_workboard/edit_workboard.
+    and provides a Results section. Workers receive a read-only snapshot
+    for context. The system updates it automatically after each worker completes.
 """
 
 
@@ -81,7 +123,11 @@ def _load_skills_catalog() -> tuple[list[dict], str, set[str]]:
 
 
 def _execute_single_subtask(subtask: str) -> str:
-    """Run a single subtask through Memento-S routing and execution. (sync)"""
+    """Run a single subtask through Memento-S routing and execution. (sync)
+
+    During orchestrator mode the worker cannot write to the workboard;
+    updates are applied later via ``_llm_workboard_update()``.
+    """
     skills, skills_xml, skill_names = _load_skills_catalog()
 
     decision = route_skill(subtask, skills, skills_xml)
@@ -99,30 +145,27 @@ def _execute_single_subtask(subtask: str) -> str:
             if not ok:
                 return f"Error: skill {skill_name!r} not found. {fetch_msg}"
 
-        return run_one_skill_loop(subtask, skill_name)
+        # Inject a read-only board snapshot as context (no edit instructions)
+        execution_text = subtask
+        board_content = read_board()
+        if board_content and board_content != "(no workboard exists)":
+            execution_text = (
+                f"{subtask}\n\n"
+                "## Workboard Context (read-only)\n"
+                "Below is a snapshot of the shared workboard for reference only. "
+                "Do NOT attempt to edit the workboard — the orchestrator will "
+                "update it on your behalf after you finish.\n\n"
+                f"```markdown\n{board_content}\n```"
+            )
 
-    # Self-evolve: create a new skill on the fly when no skill matches
-    if action == "none" and CLI_CREATE_ON_MISS:
-        available_skill_names_list = sorted(
-            {
-                str(s.get("name") or "").strip()
-                for s in skills
-                if isinstance(s, dict) and str(s.get("name") or "").strip()
-            }
-        )
-        created, created_skill_name, create_report = create_skill_on_miss(
-            subtask,
-            router_reason=str(decision.get("reason") or "").strip() or None,
-            available_skill_names=available_skill_names_list,
-        )
-        logger.info(
-            f"[Worker] create_on_miss: created={created}, skill={created_skill_name}, report={create_report[:200]}"
-        )
-        if created and isinstance(created_skill_name, str) and created_skill_name.strip():
-            skill_name = created_skill_name.strip()
-            return run_one_skill_loop(subtask, skill_name)
-
-    return decision.get("reason", "No action taken.")
+        # Block workboard writes for this worker thread
+        set_orchestrator_mode(True)
+        try:
+            return run_one_skill_loop(execution_text, skill_name)
+        finally:
+            set_orchestrator_mode(False)
+    else:
+        return decision.get("reason", "No action taken.")
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +242,20 @@ def _print_trajectory(idx: int, events: list[dict]) -> None:
     print(f"{'─' * 60}\n", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Mechanical workboard updater (runs under _workboard_update_lock)
+# ---------------------------------------------------------------------------
+
+def _mechanical_workboard_update(idx: int, subtask: str, result: str) -> None:
+    """Check off the idx-th checkbox and append a result entry."""
+    res1 = check_off_item(idx)
+    summary = result.strip()[:500]
+    if len(result.strip()) > 500:
+        summary += "..."
+    res2 = append_result(idx, summary)
+    print(f"  [Worker {idx + 1}] Mechanical fallback: {res1}, {res2}", file=sys.stderr)
+
+
 @mcp.tool(description=EXECUTE_SUBTASKS_DESCRIPTION)
 async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
     """Execute subtasks in parallel on Memento-S agent workers."""
@@ -229,30 +286,16 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             max_retries = 3
             start_time = time.perf_counter()
 
+            # ── Phase 1: Execute task (parallel, under semaphore) ──
+            result: str | None = None
+            trajectory: list[dict] = []
             for attempt in range(max_retries):
                 try:
                     async with _semaphore:
                         result, trajectory = await asyncio.to_thread(
                             _execute_single_subtask_with_trajectory, subtask, idx
                         )
-                    elapsed = round(time.perf_counter() - start_time, 2)
-                    logger.info(
-                        f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
-                    )
-                    # Auto-check-off workboard item and record result (1-indexed)
-                    check_off_item(idx + 1)
-                    summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
-                    append_result(idx + 1, summary)
-                    _print_trajectory(idx, trajectory)
-                    traj_path = _save_trajectory(idx, subtask, trajectory, result, elapsed)
-                    if traj_path:
-                        print(f"  [Worker {idx + 1}] Trajectory saved → {traj_path}", file=sys.stderr)
-                    return {
-                        "subtask_index": idx,
-                        "subtask": subtask,
-                        "result": result,
-                        "time_taken_seconds": elapsed,
-                    }
+                    break  # success
                 except Exception as e:
                     elapsed = round(time.perf_counter() - start_time, 2)
                     if attempt < max_retries - 1:
@@ -266,7 +309,30 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         logger.error(
                             f"[MementoSWorkerPool] Subtask [{idx}] failed after {max_retries} attempts ({elapsed}s): {error_msg}"
                         )
-                        raise RuntimeError(error_msg) from e
+                        result = f"FAILED: {error_msg}"
+
+            elapsed = round(time.perf_counter() - start_time, 2)
+            logger.info(f"[MementoSWorkerPool] Subtask [{idx}] Phase 1 done in {elapsed}s")
+            _print_trajectory(idx, trajectory)
+            traj_path = _save_trajectory(idx, subtask, trajectory, result or "", elapsed)
+            if traj_path:
+                print(f"  [Worker {idx + 1}] Trajectory saved → {traj_path}", file=sys.stderr)
+
+            # ── Phase 2: Exclusive workboard update (queued via lock) ──
+            print(f"  [Worker {idx + 1}] Waiting for workboard lock...", file=sys.stderr)
+            async with _workboard_update_lock:
+                print(f"  [Worker {idx + 1}] Acquired workboard lock", file=sys.stderr)
+                await asyncio.to_thread(
+                    _mechanical_workboard_update, idx, subtask, result or ""
+                )
+                print(f"  [Worker {idx + 1}] Released workboard lock", file=sys.stderr)
+
+            return {
+                "subtask_index": idx,
+                "subtask": subtask,
+                "result": result or "",
+                "time_taken_seconds": elapsed,
+            }
 
         tasks = [run_one(st, i) for i, st in enumerate(subtasks)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -309,14 +375,59 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
         }
 
 
-RUN_COMMAND_DESCRIPTION = """
-Run a shell command directly and return the full stdout + stderr.
-Use this for verification: run the project's entry point and check for errors.
-The command runs inside the Memento-S workspace directory by default.
+READ_FILES_DESCRIPTION = """
+Read one or more files and return their contents.
+
+Use this tool to directly inspect files without spawning a worker.
+Useful for:
+- Reviewing code written by workers
+- Checking interface alignment across files
+- Understanding existing code before planning tasks
 
 Args:
-  command: The shell command to execute (e.g. "python -m snake_game.main")
-  working_dir: Working directory relative to workspace (default: workspace root)
+  paths: List[str]
+    List of absolute file paths to read.
+  max_lines: int (optional, default 500)
+    Maximum lines to read per file. Use 0 for unlimited.
+"""
+
+
+@mcp.tool(description=READ_FILES_DESCRIPTION)
+async def read_files(paths: List[str], max_lines: int = 500) -> dict:
+    """Read files and return their contents."""
+    results = {}
+    for path in paths:
+        try:
+            p = Path(path)
+            if not p.exists():
+                results[path] = {"error": f"File not found: {path}"}
+                continue
+            if not p.is_file():
+                results[path] = {"error": f"Not a file: {path}"}
+                continue
+            text = p.read_text(encoding="utf-8")
+            if max_lines > 0:
+                lines = text.splitlines(keepends=True)
+                if len(lines) > max_lines:
+                    text = "".join(lines[:max_lines])
+                    text += f"\n... ({len(lines) - max_lines} more lines truncated)"
+            results[path] = {"content": text, "lines": len(text.splitlines())}
+        except Exception as e:
+            results[path] = {"error": f"{type(e).__name__}: {e}"}
+    return {"files": results}
+
+
+RUN_COMMAND_DESCRIPTION = """
+Run a shell command directly and return stdout + stderr.
+
+Use this to verify code written by workers — run the project entry point and check for errors.
+The command runs inside the workspace directory by default (where workers place generated files).
+Use project-relative paths: e.g. command="python my_project/main.py"
+ALWAYS run code after implementation to catch runtime errors before responding to the user.
+
+Args:
+  command: The shell command to execute (e.g. "python my_project/main.py")
+  working_dir: Working directory (absolute path, or relative to workspace). Default: workspace dir.
   timeout: Max seconds to wait (default: 30)
 """
 
@@ -328,7 +439,9 @@ async def run_command(command: str, working_dir: str = "", timeout: int = 30) ->
 
     workspace = Path(_MEMENTO_S_DIR) / "workspace"
     if working_dir:
-        cwd = workspace / working_dir
+        cwd = Path(working_dir)
+        if not cwd.is_absolute():
+            cwd = workspace / working_dir
     else:
         cwd = workspace
 

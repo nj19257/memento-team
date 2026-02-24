@@ -26,7 +26,11 @@ def run_one_skill(user_text: str, skill_name: str) -> str:
         return final.strip()
 
     try:
-        return execute_skill_plan(skill_name, plan if isinstance(plan, dict) else {})
+        result = execute_skill_plan(skill_name, plan if isinstance(plan, dict) else {})
+        # Strip CONTINUE: protocol prefix — only meaningful in multi-round loop
+        if result.startswith("CONTINUE:"):
+            result = result[9:].strip()
+        return result
     except Exception as exc:
         return f"ERR: {type(exc).__name__}: {exc}"
 
