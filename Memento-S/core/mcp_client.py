@@ -8,8 +8,10 @@ LangChain / LangGraph agents.
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastmcp import Client
 from langchain_core.tools import StructuredTool
@@ -21,10 +23,11 @@ from core.mcp_server import mcp as _mcp_server, configure as _configure_server
 class MCPToolManager:
     """Wraps the in-process FastMCP server, exposes LangChain tools."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, event_sink: Callable[[dict[str, Any]], None] | None = None) -> None:
         self._client: Client | None = None
         self._langchain_tools: list[StructuredTool] = []
         self._openai_tools: list[dict[str, Any]] = []
+        self._event_sink = event_sink
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -36,7 +39,7 @@ class MCPToolManager:
         self._client = Client(_mcp_server)
         await self._client.__aenter__()
         raw_tools = await self._client.list_tools()
-        self._langchain_tools = _mcp_tools_to_langchain(raw_tools, self._client)
+        self._langchain_tools = _mcp_tools_to_langchain(raw_tools, self._client, self._event_sink)
         self._openai_tools = _mcp_tools_to_openai(raw_tools)
 
     async def shutdown(self) -> None:
@@ -66,6 +69,32 @@ class MCPToolManager:
     def reconfigure(self, *, base_dir: Path | None = None) -> None:
         """Update server context without restart."""
         _configure_server(base_dir=base_dir)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _emit_event(event_sink: Callable[[dict[str, Any]], None] | None, event: str, **fields: Any) -> None:
+    if event_sink is None:
+        return
+    payload: dict[str, Any] = {"ts": _utc_now_iso(), "event": str(event)}
+    payload.update(fields)
+    try:
+        event_sink(payload)
+    except Exception:
+        # Tracing must never break tool execution.
+        pass
+
+
+def _preview_jsonable(value: Any, max_len: int = 400) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        text = repr(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
 
 
 # ------------------------------------------------------------------
@@ -113,6 +142,7 @@ def _extract_text(result: Any) -> str:
 def _mcp_tools_to_langchain(
     tools: list,
     client: Client,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[StructuredTool]:
     """Convert MCP tools to LangChain ``StructuredTool`` instances."""
     lc_tools: list[StructuredTool] = []
@@ -133,11 +163,39 @@ def _mcp_tools_to_langchain(
             _client_ref: Client = client,
             _name: str = _tool_name,
             _schema: dict = _tool_schema,
+            _event_sink: Callable[[dict[str, Any]], None] | None = event_sink,
             **kwargs: Any,
         ) -> str:
             kwargs = _coerce_tool_args(kwargs, _schema)
-            result = await _client_ref.call_tool(_name, kwargs)
-            return _extract_text(result)
+            t0 = time.perf_counter()
+            _emit_event(
+                _event_sink,
+                "tool_call_start",
+                tool_name=_name,
+                args_preview=_preview_jsonable(kwargs),
+            )
+            try:
+                result = await _client_ref.call_tool(_name, kwargs)
+                text = _extract_text(result)
+            except Exception as exc:
+                _emit_event(
+                    _event_sink,
+                    "tool_call_error",
+                    tool_name=_name,
+                    args_preview=_preview_jsonable(kwargs),
+                    error=f"{type(exc).__name__}: {exc}",
+                    duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                )
+                raise
+            _emit_event(
+                _event_sink,
+                "tool_call_end",
+                tool_name=_name,
+                args_preview=_preview_jsonable(kwargs),
+                result_preview=_preview_jsonable(text),
+                duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+            )
+            return text
 
         lc_tools.append(
             StructuredTool(

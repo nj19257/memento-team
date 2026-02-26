@@ -75,6 +75,7 @@ class OrchestratorAgent:
 - Workers are STATELESS — never write "use the result from subtask 1"
 - Keep subtasks atomic and bounded
 - If the task has many parts, split into bounded slices
+- when you are asked to search for information about elements in a broad category (e.g. "comprehensive list of X"), first search for the list of relevant elements, then in the next turn create separate subtasks for each element to find details and verify information.
 
 ## CRITICAL: Workers are STATELESS
 - Write SELF-CONTAINED descriptions with full details
@@ -91,24 +92,33 @@ Based on this, focus on decomposing the task into clear, self-contained subtasks
 
 ## WORKBOARD (WORKER COORDINATION) — REQUIRED
 When calling execute_subtasks, you MUST always include a `workboard` parameter.
-The workboard is a markdown string that creates a shared file workers receive as read-only context.
-The worker pool updates it automatically after each subtask completes.
+The workboard is a markdown string shared with workers. Workers can read and edit it via
+`read_workboard` and `edit_workboard(tag, content)` by filling tagged sections assigned to them.
 
 Always create a workboard that:
-1. Lists every subtask with its index and a status checkbox (e.g. `- [ ] Subtask 1: ...`)
-2. Includes a "Results" section for the worker pool to fill in
-3. Provides any shared context workers might need
+1. Lists every subtask with its index and a status checkbox (e.g. `- [ ] 1 (t1): ...`)
+2. Assigns a subtask ID to each worker (`t1`, `t2`, ...)
+3. Includes empty tagged slots for each worker (e.g. `<t1_result></t1_result>`)
+4. Provides any shared context workers might need
+5. Includes a "Results" section (optional summary area for the manager)
 
 Example workboard format:
 ```
 # Task Board
 ## Subtasks
-- [ ] 1: Search for X and summarize findings
-- [ ] 2: Search for Y and summarize findings
+- [ ] 1 (t1): Search for X and summarize findings
+- [ ] 2 (t2): Search for Y and summarize findings
 ## Shared Context
 <any relevant context the workers should know>
+## Worker Slots
+### t1
+<t1_status></t1_status>
+<t1_result></t1_result>
+### t2
+<t2_status></t2_status>
+<t2_result></t2_result>
 ## Results
-(auto-filled by worker pool)
+(manager may summarize here)
 ```
 
 ## OUTPUT

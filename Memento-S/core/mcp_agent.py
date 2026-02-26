@@ -8,8 +8,9 @@ LangChain ``StructuredTool`` instances.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Callable
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
@@ -57,7 +58,8 @@ class MCPAgent:
         "\n"
         "## Core tools\n"
         "You have tools for: bash commands, editing files, creating files, "
-        "and viewing files/directories.\n"
+        "viewing files/directories, and shared workboard coordination "
+        "(`read_workboard`, `edit_workboard`).\n"
         "\n"
         "## Skill discovery & execution\n"
         "You also have skill-discovery tools: `list_local_skills`, "
@@ -71,6 +73,11 @@ class MCPAgent:
         "relevant skill.\n"
         "2. Use `read_skill` to learn how the skill works.\n"
         "3. Execute the skill's scripts/commands via `bash_tool`.\n"
+        "\n"
+        "## Workboard coordination\n"
+        "When a workboard is provided in the task context, use "
+        "`read_workboard` to inspect it and `edit_workboard(tag, content)` "
+        "to fill only your assigned tagged sections.\n"
         "\n"
         "## Saving new skills\n"
         "When asked to save a pipeline or workflow as a reusable skill, "
@@ -89,6 +96,7 @@ class MCPAgent:
         system_prompt: str | None = None,
         base_dir: Path | None = None,
         recursion_limit: int = 150,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """
         Args:
@@ -101,17 +109,33 @@ class MCPAgent:
         self._system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
         self._base_dir = base_dir
         self._recursion_limit = recursion_limit
-        self._tool_manager = MCPToolManager()
+        self._event_sink = event_sink
+        self._tool_manager = MCPToolManager(event_sink=event_sink)
         self._agent_graph: Any = None
+
+    def _emit_event(self, event: str, **fields: Any) -> None:
+        if self._event_sink is None:
+            return
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": str(event),
+        }
+        payload.update(fields)
+        try:
+            self._event_sink(payload)
+        except Exception:
+            pass
 
     async def start(self) -> None:
         """Start the MCP server and build the agent graph.
 
         Must be called before ``run()`` or ``stream()``.
         """
+        self._emit_event("agent_start", base_dir=str(self._base_dir or ""), recursion_limit=self._recursion_limit)
         await self._tool_manager.start(base_dir=self._base_dir)
         tools = self._tool_manager.get_langchain_tools()
         logger.info(f"MCPAgent: loaded tools: {[t.name for t in tools]}")
+        self._emit_event("agent_tools_loaded", tool_names=[t.name for t in tools], tool_count=len(tools))
 
         self._agent_graph = create_agent(
             model=self.model,
@@ -137,10 +161,16 @@ class MCPAgent:
         else:
             messages = _to_lc_messages(query)
 
+        self._emit_event(
+            "agent_run_start",
+            input_type="str" if isinstance(query, str) else "messages",
+            message_count=len(messages),
+        )
         result = await self._agent_graph.ainvoke(
             {"messages": messages},
             config={"recursion_limit": self._recursion_limit},
         )
+        self._emit_event("agent_run_end", result_type=type(result).__name__)
         return result
 
     async def stream(
@@ -171,8 +201,10 @@ class MCPAgent:
 
     async def close(self) -> None:
         """Shutdown the MCP server and release resources."""
+        self._emit_event("agent_close_start")
         await self._tool_manager.shutdown()
         self._agent_graph = None
+        self._emit_event("agent_close_end")
 
     @property
     def tool_manager(self) -> MCPToolManager:

@@ -19,6 +19,10 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Static, TextArea
 try:
+    from textual.widgets import Input
+except Exception:
+    Input = None  # type: ignore[assignment]
+try:
     from textual.widgets import MarkdownViewer
 except Exception:
     MarkdownViewer = None  # type: ignore[assignment]
@@ -27,11 +31,22 @@ from orchestrator.orchestrator_agent import OrchestratorAgent
 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
+WORKBOARD_PATH = ROOT / "Memento-S" / "workspace" / ".workboard.md"
 
 # Ensure Memento-S imports resolve for workboard helpers.
 sys.path.insert(0, str(ROOT / "Memento-S"))
 
-from core.workboard import cleanup_board, get_board_path  # noqa: E402
+
+def get_board_path() -> Path:
+    return WORKBOARD_PATH
+
+
+def cleanup_board() -> None:
+    try:
+        if WORKBOARD_PATH.exists():
+            WORKBOARD_PATH.unlink()
+    except Exception:
+        pass
 
 
 class MementoTUI(App):
@@ -131,6 +146,16 @@ class MementoTUI(App):
         height: 1fr;
         margin-bottom: 1;
         color: #d6e4f4;
+    }
+
+    #steps_filters {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    .steps_filter_input {
+        width: 1fr;
+        margin-right: 1;
     }
 
     #steps_subtask {
@@ -234,6 +259,9 @@ class MementoTUI(App):
         self._active_tab: str = "board"
         self._board_view: str = "raw"
         self._session_worker_order: list[str] = []
+        self._steps_filter_tool: str = ""
+        self._steps_filter_subtask_id: str = ""
+        self._steps_group_enabled: bool = True
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -256,6 +284,14 @@ class MementoTUI(App):
                     yield Static("Execution Steps (selected worker)", id="title_steps", classes="section_title")
                     yield Static("(no worker selected)", id="steps_worker_row")
                     yield Static("(select a worker to view its subtask)", id="steps_subtask")
+                    with Horizontal(id="steps_filters"):
+                        if Input is not None:
+                            yield Input(placeholder="Filter tool_name (e.g. edit_workboard)", id="steps_filter_tool", classes="steps_filter_input")
+                            yield Input(placeholder="Filter subtask_id (e.g. t1)", id="steps_filter_subtask", classes="steps_filter_input")
+                        else:
+                            yield Static("Trace filters unavailable (Textual Input widget not installed)")
+                        yield Button("Grouping: On", id="steps_group_toggle", classes="subtab_btn active_subtab", variant="primary")
+                        yield Button("Clear", id="steps_filter_clear", classes="subtab_btn")
                     yield DataTable(id="steps_table")
 
                 with Vertical(id="panel_board"):
@@ -287,7 +323,7 @@ class MementoTUI(App):
         workers_table.cursor_type = "row"
 
         steps_table = self.query_one("#steps_table", DataTable)
-        steps_table.add_columns("Time", "Event", "Details")
+        steps_table.add_columns("Time", "Subtask", "Tool", "Event", "Details")
         steps_table.cursor_type = "row"
 
         self.set_interval(1.0, self._refresh_workers)
@@ -343,6 +379,37 @@ class MementoTUI(App):
             self._set_board_view("raw")
         elif event.button.id == "board_rendered":
             self._set_board_view("rendered")
+        elif event.button.id == "steps_group_toggle":
+            self._steps_group_enabled = not self._steps_group_enabled
+            btn = self.query_one("#steps_group_toggle", Button)
+            btn.label = f"Grouping: {'On' if self._steps_group_enabled else 'Off'}"
+            btn.variant = "primary" if self._steps_group_enabled else "default"
+            btn.set_class(self._steps_group_enabled, "active_subtab")
+            if self._selected_worker_path is not None and self._selected_worker_path.exists():
+                self._load_worker_steps(self._selected_worker_path)
+        elif event.button.id == "steps_filter_clear":
+            self._steps_filter_tool = ""
+            self._steps_filter_subtask_id = ""
+            if Input is not None:
+                try:
+                    self.query_one("#steps_filter_tool", Input).value = ""  # type: ignore[arg-type]
+                    self.query_one("#steps_filter_subtask", Input).value = ""  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if self._selected_worker_path is not None and self._selected_worker_path.exists():
+                self._load_worker_steps(self._selected_worker_path)
+
+    def on_input_changed(self, event) -> None:  # Textual Input.Changed
+        widget_id = getattr(getattr(event, "input", None), "id", None)
+        value = str(getattr(getattr(event, "input", None), "value", "") or "").strip()
+        if widget_id == "steps_filter_tool":
+            self._steps_filter_tool = value
+        elif widget_id == "steps_filter_subtask":
+            self._steps_filter_subtask_id = value
+        else:
+            return
+        if self._selected_worker_path is not None and self._selected_worker_path.exists():
+            self._load_worker_steps(self._selected_worker_path)
 
     def _trigger_run_task(self) -> None:
         if self._task_running:
@@ -572,11 +639,25 @@ class MementoTUI(App):
         table.clear(columns=False)
 
         row_count = 0
+        last_group_key: tuple[str, str] | None = None
         for event in self._read_events(path):
             ts = self._event_time(event)
             name = str(event.get("event", ""))
+            tool_name = self._event_tool_name(event)
+            subtask_id = self._event_subtask_id(event)
+            if self._steps_filter_tool and self._steps_filter_tool.lower() not in tool_name.lower():
+                continue
+            if self._steps_filter_subtask_id and self._steps_filter_subtask_id.lower() not in subtask_id.lower():
+                continue
+            if self._steps_group_enabled:
+                group_key = (subtask_id or "-", tool_name or f"event:{name}")
+                if group_key != last_group_key:
+                    group_label = f"subtask={group_key[0]} | tool={group_key[1]}"
+                    table.add_row("", "", "", "group", group_label)
+                    row_count += 1
+                    last_group_key = group_key
             detail = self._event_detail(event)
-            table.add_row(ts, name, detail)
+            table.add_row(ts, subtask_id or "-", tool_name or "-", name, detail)
             row_count += 1
 
         # Auto-follow newest events: keep viewport pinned to the last row.
@@ -795,6 +876,44 @@ class MementoTUI(App):
         if name == "route_skill_output":
             decision = event.get("decision", {})
             return cls._short(str(decision), 140)
+        if name == "worker_start":
+            return cls._short(f"subtask={event.get('subtask', '')}", 140)
+        if name == "worker_attempt_start":
+            return f"attempt={event.get('attempt')} subtask_id={event.get('subtask_id')}"
+        if name == "worker_prompt_built":
+            return cls._short(f"subtask_id={event.get('subtask_id')} prompt={event.get('prompt_preview', '')}", 140)
+        if name == "agent_tools_loaded":
+            return cls._short(f"tools={event.get('tool_names', [])}", 140)
+        if name == "agent_run_start":
+            return f"message_count={event.get('message_count')}"
+        if name == "agent_run_end":
+            return f"result_type={event.get('result_type')}"
+        if name == "tool_call_start":
+            return cls._short(f"{event.get('tool_name')} args={event.get('args_preview', '')}", 140)
+        if name == "tool_call_end":
+            return cls._short(
+                f"{event.get('tool_name')} {event.get('duration_ms')}ms result={event.get('result_preview', '')}",
+                140,
+            )
+        if name == "tool_call_error":
+            return cls._short(
+                f"{event.get('tool_name')} ERR {event.get('duration_ms')}ms error={event.get('error', '')}",
+                140,
+            )
+        if name == "workboard_snapshot_read":
+            return f"bytes={event.get('bytes')}"
+        if name == "workboard_checkbox_update":
+            return f"item={event.get('item')} checked"
+        if name == "workboard_result_append":
+            return cls._short(f"item={event.get('item')} summary={event.get('summary', '')}", 140)
+        if name == "worker_agent_invoke_start":
+            return f"subtask_id={event.get('subtask_id')}"
+        if name == "worker_agent_invoke_end":
+            return cls._short(f"subtask_id={event.get('subtask_id')} result={event.get('result_preview', '')}", 140)
+        if name == "worker_attempt_error":
+            return cls._short(f"attempt={event.get('attempt')} error={event.get('error', '')}", 140)
+        if name == "worker_end":
+            return cls._short(f"status={event.get('status')} sec={event.get('duration_seconds')}", 140)
 
         # Generic fallback: include compact JSON without very large fields.
         compact = {
@@ -803,6 +922,14 @@ class MementoTUI(App):
             if k not in {"session_id", "messages", "result", "output", "user_text"}
         }
         return cls._short(json.dumps(compact, ensure_ascii=False), 140)
+
+    @staticmethod
+    def _event_tool_name(event: dict[str, Any]) -> str:
+        return str(event.get("tool_name") or "").strip()
+
+    @staticmethod
+    def _event_subtask_id(event: dict[str, Any]) -> str:
+        return str(event.get("subtask_id") or "").strip()
 
     @staticmethod
     def _short(text: str, max_len: int = 120) -> str:

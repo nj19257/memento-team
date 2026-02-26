@@ -41,12 +41,14 @@ class TestMCPAgent:
             await agent.start()
             try:
                 tools = agent.tool_manager.get_langchain_tools()
-                assert len(tools) == 7
+                assert len(tools) == 9
                 names = {t.name for t in tools}
                 assert "bash_tool" in names
                 assert "str_replace" in names
                 assert "file_create" in names
                 assert "view" in names
+                assert "read_workboard" in names
+                assert "edit_workboard" in names
 
                 # Agent graph should be built
                 assert agent._agent_graph is not None
@@ -117,8 +119,9 @@ class TestMCPAgent:
             try:
                 names = agent.tool_names
                 assert isinstance(names, list)
-                assert len(names) == 7
+                assert len(names) == 9
                 assert "bash_tool" in names
+                assert "read_workboard" in names
             finally:
                 await agent.close()
 

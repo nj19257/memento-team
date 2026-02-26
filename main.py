@@ -10,15 +10,18 @@ from orchestrator.orchestrator_agent import OrchestratorAgent
 
 load_dotenv()
 
+ROOT = os.path.dirname(__file__)
+WORKBOARD_PATH = os.path.join(ROOT, "Memento-S", "workspace", ".workboard.md")
+
 # Ensure Memento-S is on the import path for workboard cleanup
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "Memento-S"))
+sys.path.insert(0, os.path.join(ROOT, "Memento-S"))
 
 
 async def main():
     # Clean up old workboard from previous runs
     try:
-        from core.workboard import cleanup_board
-        cleanup_board()
+        if os.path.exists(WORKBOARD_PATH):
+            os.remove(WORKBOARD_PATH)
     except Exception:
         pass  # Non-fatal
     model = ChatOpenAI(

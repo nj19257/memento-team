@@ -1,16 +1,19 @@
-"""Unified FastMCP server with 7 tools.
+"""Unified FastMCP server with workboard-aware MCP tools.
 
 A single in-process server that the LLM can call via the standard MCP
 protocol instead of the legacy ops/bridge dispatcher.
 
 Core tools: bash_tool, str_replace, file_create, view
+Coordination tools: read_workboard, edit_workboard
 Skills tools: search_cloud_skills, read_skill, list_local_skills
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Annotated
 
@@ -24,6 +27,7 @@ mcp = FastMCP("memento")
 # Shared state – set once at startup via configure()
 # ---------------------------------------------------------------------------
 _base_dir: Path = WORKSPACE_DIR
+_workboard_lock = threading.Lock()
 
 
 def configure(*, base_dir: Path | None = None) -> None:
@@ -49,6 +53,10 @@ def _resolve_path(raw: str) -> Path:
     if p.exists() or p.parent.exists():
         return p
     return _base_dir / p.relative_to(p.anchor)
+
+
+def _workboard_path() -> Path:
+    return _base_dir / ".workboard.md"
 
 
 # ===================================================================
@@ -242,7 +250,70 @@ def _view_directory(
 
 
 # ===================================================================
-# 5. search_cloud_skills
+# 5. read_workboard
+# ===================================================================
+
+
+@mcp.tool
+def read_workboard(
+    tag: Annotated[str, "Optional tag name to read (e.g. t1_result). Empty reads full board."] = "",
+) -> str:
+    """Read the shared workboard, or a single tagged section."""
+    path = _workboard_path()
+    if not path.exists():
+        return "read_workboard ERR: workboard does not exist"
+    text = path.read_text(encoding="utf-8")
+    tag_name = str(tag or "").strip()
+    if not tag_name:
+        return text
+    if not re.fullmatch(r"[A-Za-z0-9_:-]+", tag_name):
+        return f"read_workboard ERR: invalid tag: {tag_name!r}"
+    m = re.search(rf"<{re.escape(tag_name)}>(.*?)</{re.escape(tag_name)}>", text, re.DOTALL)
+    if not m:
+        return f"read_workboard ERR: tag not found: {tag_name}"
+    return m.group(1).strip()
+
+
+# ===================================================================
+# 6. edit_workboard
+# ===================================================================
+
+
+@mcp.tool
+def edit_workboard(
+    tag: Annotated[str, "Tag name to replace (e.g. t1_result)"],
+    content: Annotated[str, "New content to write inside the tag block"],
+) -> str:
+    """Replace the content of a tagged workboard section: <tag>...</tag>."""
+    tag_name = str(tag or "").strip()
+    if not tag_name:
+        return "edit_workboard ERR: missing tag"
+    if not re.fullmatch(r"[A-Za-z0-9_:-]+", tag_name):
+        return f"edit_workboard ERR: invalid tag: {tag_name!r}"
+
+    path = _workboard_path()
+    if not path.exists():
+        return "edit_workboard ERR: workboard does not exist"
+
+    with _workboard_lock:
+        text = path.read_text(encoding="utf-8")
+        pattern = re.compile(
+            rf"(<{re.escape(tag_name)}>)(.*?)(</{re.escape(tag_name)}>)",
+            re.DOTALL,
+        )
+        m = pattern.search(text)
+        if not m:
+            return f"edit_workboard ERR: tag not found: {tag_name}"
+
+        new_inner = str(content or "")
+        replacement = m.group(1) + new_inner + m.group(3)
+        new_text = text[: m.start()] + replacement + text[m.end() :]
+        path.write_text(new_text, encoding="utf-8")
+    return f"edit_workboard OK: {tag_name}"
+
+
+# ===================================================================
+# 7. search_cloud_skills
 # ===================================================================
 
 @mcp.tool
@@ -271,7 +342,7 @@ def search_cloud_skills(
 
 
 # ===================================================================
-# 6. read_skill
+# 8. read_skill
 # ===================================================================
 
 @mcp.tool
@@ -287,7 +358,7 @@ def read_skill(
 
 
 # ===================================================================
-# 7. list_local_skills
+# 9. list_local_skills
 # ===================================================================
 
 @mcp.tool

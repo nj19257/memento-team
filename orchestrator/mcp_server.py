@@ -100,6 +100,16 @@ def _workboard_append_result(index_1_based: int, text: str) -> str:
     return f"append_result OK: task {index_1_based}"
 
 
+def _workboard_uses_tag_protocol() -> bool:
+    if not WORKBOARD_PATH.exists():
+        return False
+    try:
+        text = WORKBOARD_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
+
+
 def _extract_agent_output(result: dict[str, Any] | Any) -> str:
     """Best-effort extraction of final assistant text from MCPAgent.run()."""
     if isinstance(result, dict):
@@ -142,30 +152,33 @@ SUBTASK DESIGN RULES:
 1. SELF-CONTAINED: Each subtask must be fully independent with complete context
    - GOOD: "Read /path/to/config.py and extract the database URL"
    - BAD: "Read the config file mentioned earlier"
-2. EXPLICIT: Always include full file paths, entity names, details
-3. NATURAL LANGUAGE: Write clear directives
-4. ATOMIC: One focused task per subtask
+2. ATOMIC: One focused task per subtask
 
 Args:
   subtasks: List[str]
     List of 1 to {MAX_POOL_SIZE} fully self-contained task descriptions.
   workboard: str (RECOMMENDED — always provide)
     Markdown content for a shared workboard file that lists the subtasks
-    and provides a Results section. Workers receive it as read-only context.
-    The orchestrator updates the workboard after each worker finishes.
+    and provides tagged worker slots (e.g. <t1_result></t1_result>).
+    Workers can use read_workboard/edit_workboard to fill their own tags.
+    Include subtask IDs (t1, t2, ...) in the board and subtask descriptions.
 """
 
 
-async def _execute_single_subtask(subtask: str) -> str:
+async def _execute_single_subtask(subtask: str, subtask_id: str | None = None) -> str:
     """Run a single subtask using the new Memento-S MCPAgent."""
     execution_text = subtask
     board_content = _workboard_read()
+    sid = str(subtask_id or "").strip()
+    tag_prefix = f"{sid}_" if sid else ""
     if board_content and board_content != "(no workboard exists)":
         execution_text = (
             f"{subtask}\n\n"
-            "## Active Workboard (read-only context)\n"
-            "A shared workboard exists. Treat it as context only; do not attempt "
-            "to edit it. The orchestrator will update the board after you finish.\n\n"
+            "## Workboard Coordination\n"
+            "A shared workboard exists. Use `read_workboard` and `edit_workboard` "
+            "to read and fill your assigned tagged sections.\n"
+            + (f"Your subtask ID is `{sid}`. Only edit tags starting with `{tag_prefix}`.\n" if sid else "")
+            + "Read the board first, then write concise updates into your tags.\n\n"
             f"```markdown\n{board_content}\n```"
         )
 
@@ -176,6 +189,14 @@ async def _execute_single_subtask(subtask: str) -> str:
         return _extract_agent_output(result).strip()
     finally:
         await agent.close()
+
+
+def _trajectory_event(event: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": str(event),
+        **fields,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +308,37 @@ def _print_trajectory(idx: int, events: list[dict]) -> None:
     for e in events:
         event = e.get("event", "?")
         ts = e.get("ts", "")
-        if event == "run_one_skill_loop_start":
+        if event == "worker_start":
+            _stderr_print(f"  [{ts}] START  subtask={_short(e.get('subtask', ''))}")
+        elif event == "worker_attempt_start":
+            _stderr_print(f"  [{ts}] TRY    attempt={e.get('attempt')}  subtask_id={e.get('subtask_id')}")
+        elif event == "worker_prompt_built":
+            _stderr_print(f"  [{ts}] PROMPT subtask_id={e.get('subtask_id')}")
+        elif event == "agent_tools_loaded":
+            _stderr_print(f"  [{ts}] TOOLS  count={e.get('tool_count')} names={_short(str(e.get('tool_names', [])), 80)}")
+        elif event == "agent_run_start":
+            _stderr_print(f"  [{ts}] AGENT  run_start messages={e.get('message_count')}")
+        elif event == "tool_call_start":
+            _stderr_print(f"  [{ts}] TOOL   {e.get('tool_name')} start")
+        elif event == "tool_call_end":
+            _stderr_print(
+                f"  [{ts}] TOOL   {e.get('tool_name')} ok {e.get('duration_ms')}ms result={_short(str(e.get('result_preview', '')), 80)}"
+            )
+        elif event == "tool_call_error":
+            _stderr_print(
+                f"  [{ts}] TOOL   {e.get('tool_name')} ERR {e.get('duration_ms')}ms { _short(str(e.get('error','')), 80)}"
+            )
+        elif event == "workboard_snapshot_read":
+            _stderr_print(f"  [{ts}] BOARD  snapshot bytes={e.get('bytes')}")
+        elif event == "workboard_checkbox_update":
+            _stderr_print(f"  [{ts}] BOARD  checkbox item={e.get('item')} checked")
+        elif event == "workboard_result_append":
+            _stderr_print(f"  [{ts}] BOARD  result_append item={e.get('item')}")
+        elif event == "worker_agent_invoke_end":
+            _stderr_print(f"  [{ts}] AGENT  run_end result={_short(str(e.get('result_preview','')), 80)}")
+        elif event == "worker_end":
+            _stderr_print(f"  [{ts}] END    status={e.get('status')} sec={e.get('duration_seconds')}")
+        elif event == "run_one_skill_loop_start":
             _stderr_print(f"  [{ts}] START  skill={e.get('skill_name')}  task={_short(e.get('user_text', ''))}")
         elif event == "run_one_skill_loop_round_plan":
             plan = e.get("plan", {})
@@ -333,20 +384,68 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             max_retries = 3
             start_time = time.perf_counter()
             live_traj_path = _create_live_trajectory(idx, subtask)
+            trajectory: list[dict[str, Any]] = []
+
+            def record(event: str, **fields: Any) -> None:
+                e = _trajectory_event(event, worker_index=idx, **fields)
+                trajectory.append(e)
+                if live_traj_path is not None:
+                    _append_live_trajectory_event(live_traj_path, e)
+
+            record("worker_start", subtask=subtask)
 
             for attempt in range(max_retries):
                 try:
                     async with _semaphore:
-                        result = await _execute_single_subtask(subtask)
-                        trajectory = []
+                        subtask_id = f"t{idx + 1}"
+                        worker_input = f"[Subtask ID: {subtask_id}]\n{subtask}"
+                        record("worker_attempt_start", attempt=attempt + 1, subtask_id=subtask_id)
+
+                        def sink(ev: dict[str, Any]) -> None:
+                            payload = dict(ev)
+                            payload.setdefault("worker_index", idx)
+                            payload.setdefault("subtask_id", subtask_id)
+                            trajectory.append(payload)
+                            if live_traj_path is not None:
+                                _append_live_trajectory_event(live_traj_path, payload)
+
+                        # Rebuild prompt here so we can emit wrapper events and use MCPAgent sink.
+                        execution_text = worker_input
+                        board_content = _workboard_read()
+                        if board_content and board_content != "(no workboard exists)":
+                            sink(_trajectory_event("workboard_snapshot_read", bytes=len(board_content.encode("utf-8"))))
+                            tag_prefix = f"{subtask_id}_"
+                            execution_text = (
+                                f"{worker_input}\n\n"
+                                "## Workboard Coordination\n"
+                                "A shared workboard exists. Use `read_workboard` and `edit_workboard` "
+                                "to read and fill your assigned tagged sections.\n"
+                                f"Your subtask ID is `{subtask_id}`. Only edit tags starting with `{tag_prefix}`.\n"
+                                "Read the board first, then write concise updates into your tags.\n\n"
+                                f"```markdown\n{board_content}\n```"
+                            )
+                        sink(_trajectory_event("worker_prompt_built", subtask_id=subtask_id, prompt_preview=execution_text[:500]))
+                        agent = MCPAgent(model=build_chat_model(), base_dir=WORKSPACE_DIR, event_sink=sink)
+                        await agent.start()
+                        try:
+                            sink(_trajectory_event("worker_agent_invoke_start", subtask_id=subtask_id))
+                            agent_result = await agent.run(execution_text)
+                            result = _extract_agent_output(agent_result).strip()
+                            sink(_trajectory_event("worker_agent_invoke_end", subtask_id=subtask_id, result_preview=result[:500]))
+                        finally:
+                            await agent.close()
                     elapsed = round(time.perf_counter() - start_time, 2)
                     logger.info(
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
                     )
                     if workboard and workboard.strip():
                         _workboard_check_off_item(idx + 1)
-                        summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
-                        _workboard_append_result(idx + 1, summary)
+                        record("workboard_checkbox_update", subtask_id=subtask_id, item=idx + 1, status="checked")
+                        if not _workboard_uses_tag_protocol():
+                            summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
+                            _workboard_append_result(idx + 1, summary)
+                            record("workboard_result_append", subtask_id=subtask_id, item=idx + 1, summary=summary)
+                    record("worker_end", subtask_id=subtask_id, duration_seconds=elapsed, status="ok")
                     _print_trajectory(idx, trajectory)
                     traj_path = _save_trajectory(
                         idx,
@@ -367,6 +466,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                     }
                 except Exception as e:
                     elapsed = round(time.perf_counter() - start_time, 2)
+                    record("worker_attempt_error", attempt=attempt + 1, error=f"{type(e).__name__}: {e}")
                     if attempt < max_retries - 1:
                         logger.info(
                             f"[MementoSWorkerPool] Subtask [{idx}] attempt {attempt + 1}/{max_retries} "
@@ -378,6 +478,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         logger.error(
                             f"[MementoSWorkerPool] Subtask [{idx}] failed after {max_retries} attempts ({elapsed}s): {error_msg}"
                         )
+                        record("worker_end", duration_seconds=elapsed, status="failed", error=error_msg)
                         _save_trajectory(
                             idx,
                             subtask,
