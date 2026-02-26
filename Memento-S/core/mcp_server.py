@@ -350,9 +350,26 @@ def read_skill(
     skill_name: Annotated[str, "Name of the skill to read"],
 ) -> str:
     """Read a skill's SKILL.md content."""
-    from core.skill_engine.skill_resolver import openskills_read
+    from core.skill_engine.skill_resolver import openskills_read, _resolve_skill_dir
     try:
-        return openskills_read(skill_name)
+        raw = openskills_read(skill_name)
+        local_dir = _resolve_skill_dir(skill_name)
+        if local_dir is None:
+            return raw
+
+        base_dir = str(local_dir.resolve())
+        # Expand the placeholder shown in many SKILL.md files so the agent
+        # receives a concrete runnable path instead of guessing legacy paths.
+        rendered = raw.replace("{baseDir}", base_dir)
+        if rendered is raw:
+            rendered = raw
+
+        prefix = (
+            f"[Local skill path]\n{base_dir}\n"
+            f"[Tip]\nUse scripts from this path. For shell scripts, prefer "
+            f"`bash {base_dir}/scripts/<script>.sh ...` if direct execution fails.\n\n"
+        )
+        return prefix + rendered
     except Exception as exc:
         return f"read_skill ERR: {exc}"
 
