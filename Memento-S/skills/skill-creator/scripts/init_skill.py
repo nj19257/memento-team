@@ -62,13 +62,6 @@ Delete this entire "Structuring This Skill" section when done - it's just guidan
 - Concrete examples with realistic user requests
 - References to scripts/templates/references as needed]
 
-## Execution Compatibility (Bridge Runtime)
-
-- For bundled executable files, prefer relative command paths like `python scripts/my_tool.py`.
-- For bundled resource references in ops, prefer relative roots: `scripts/`, `references/`, `assets/`, `templates/`.
-- Use explicit `working_dir` and explicit output paths for user/project artifacts.
-- Avoid MCP/tool_calls formats; use `{"ops":[{"type":"..."}]}` only.
-
 ## Resources
 
 This skill includes example resource directories that demonstrate how to organize different types of bundled resources:
@@ -83,7 +76,6 @@ Executable code (Python/Bash/etc.) that can be run directly to perform specific 
 **Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
 
 **Note:** Scripts may be executed without loading into context, but can still be read by Claude for patching or environment adjustments.
-Prefer portable invocation style in SKILL.md examples: `python scripts/...`.
 
 ### references/
 Documentation and reference material intended to be loaded into context to inform Claude's process and thinking.
@@ -213,13 +205,15 @@ def init_skill(skill_name, path):
     # Determine skill directory path
     skill_dir = Path(path).resolve() / skill_name
 
-    # Create skill directory (or reuse if it already exists)
+    # Check if directory already exists
+    if skill_dir.exists():
+        print(f"❌ Error: Skill directory already exists: {skill_dir}")
+        return None
+
+    # Create skill directory
     try:
-        if not skill_dir.exists():
-            skill_dir.mkdir(parents=True, exist_ok=False)
-            print(f"✅ Created skill directory: {skill_dir}")
-        else:
-            print(f"⚠️ Skill directory already exists: {skill_dir} (will ensure missing files)")
+        skill_dir.mkdir(parents=True, exist_ok=False)
+        print(f"✅ Created skill directory: {skill_dir}")
     except Exception as e:
         print(f"❌ Error creating directory: {e}")
         return None
@@ -233,11 +227,8 @@ def init_skill(skill_name, path):
 
     skill_md_path = skill_dir / 'SKILL.md'
     try:
-        if not skill_md_path.exists():
-            skill_md_path.write_text(skill_content)
-            print("✅ Created SKILL.md")
-        else:
-            print("⚠️ SKILL.md already exists (skipped)")
+        skill_md_path.write_text(skill_content)
+        print("✅ Created SKILL.md")
     except Exception as e:
         print(f"❌ Error creating SKILL.md: {e}")
         return None
@@ -248,32 +239,23 @@ def init_skill(skill_name, path):
         scripts_dir = skill_dir / 'scripts'
         scripts_dir.mkdir(exist_ok=True)
         example_script = scripts_dir / 'example.py'
-        if not example_script.exists():
-            example_script.write_text(EXAMPLE_SCRIPT.format(skill_name=skill_name))
-            example_script.chmod(0o755)
-            print("✅ Created scripts/example.py")
-        else:
-            print("⚠️ scripts/example.py already exists (skipped)")
+        example_script.write_text(EXAMPLE_SCRIPT.format(skill_name=skill_name))
+        example_script.chmod(0o755)
+        print("✅ Created scripts/example.py")
 
         # Create references/ directory with example reference doc
         references_dir = skill_dir / 'references'
         references_dir.mkdir(exist_ok=True)
         example_reference = references_dir / 'api_reference.md'
-        if not example_reference.exists():
-            example_reference.write_text(EXAMPLE_REFERENCE.format(skill_title=skill_title))
-            print("✅ Created references/api_reference.md")
-        else:
-            print("⚠️ references/api_reference.md already exists (skipped)")
+        example_reference.write_text(EXAMPLE_REFERENCE.format(skill_title=skill_title))
+        print("✅ Created references/api_reference.md")
 
         # Create assets/ directory with example asset placeholder
         assets_dir = skill_dir / 'assets'
         assets_dir.mkdir(exist_ok=True)
         example_asset = assets_dir / 'example_asset.txt'
-        if not example_asset.exists():
-            example_asset.write_text(EXAMPLE_ASSET)
-            print("✅ Created assets/example_asset.txt")
-        else:
-            print("⚠️ assets/example_asset.txt already exists (skipped)")
+        example_asset.write_text(EXAMPLE_ASSET)
+        print("✅ Created assets/example_asset.txt")
     except Exception as e:
         print(f"❌ Error creating resource directories: {e}")
         return None
@@ -292,9 +274,9 @@ def main():
     if len(sys.argv) < 4 or sys.argv[2] != '--path':
         print("Usage: init_skill.py <skill-name> --path <path>")
         print("\nSkill name requirements:")
-        print("  - Hyphen-case identifier (e.g., 'data-analyzer')")
+        print("  - Kebab-case identifier (e.g., 'my-data-analyzer')")
         print("  - Lowercase letters, digits, and hyphens only")
-        print("  - Max 40 characters")
+        print("  - Max 64 characters")
         print("  - Must match directory name exactly")
         print("\nExamples:")
         print("  init_skill.py my-new-skill --path skills/public")

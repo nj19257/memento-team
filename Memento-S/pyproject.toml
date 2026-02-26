@@ -8,8 +8,12 @@ dependencies = [
     "anthropic",
     "openai",
     "litellm",
-    "mcp",
     "fastmcp",
+    "langchain",
+    "langchain-core",
+    "langchain-mcp-adapters",
+    "langchain-openai",
+    "langgraph",
     "tiktoken",
     "httpx",
     "aiohttp",
@@ -22,7 +26,6 @@ dependencies = [
     "camel-ai",
     "nltk",
     "prompt_toolkit",
-    "textual",
     "tqdm",
 ]
 

@@ -91,12 +91,12 @@ Based on this, focus on decomposing the task into clear, self-contained subtasks
 
 ## WORKBOARD (WORKER COORDINATION) — REQUIRED
 When calling execute_subtasks, you MUST always include a `workboard` parameter.
-The workboard is a markdown string that creates a shared file all workers can read and edit.
-Workers use `read_workboard` and `edit_workboard` ops to coordinate in real time.
+The workboard is a markdown string that creates a shared file workers receive as read-only context.
+The worker pool updates it automatically after each subtask completes.
 
 Always create a workboard that:
 1. Lists every subtask with its index and a status checkbox (e.g. `- [ ] Subtask 1: ...`)
-2. Includes a "Results" section where workers can record their findings
+2. Includes a "Results" section for the worker pool to fill in
 3. Provides any shared context workers might need
 
 Example workboard format:
@@ -108,7 +108,7 @@ Example workboard format:
 ## Shared Context
 <any relevant context the workers should know>
 ## Results
-(workers will fill this in)
+(auto-filled by worker pool)
 ```
 
 ## OUTPUT

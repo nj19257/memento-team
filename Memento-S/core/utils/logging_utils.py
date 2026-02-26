@@ -20,27 +20,6 @@ _EXEC_LOG_FILE: Path | None = None
 _EXEC_LOG_FAILED: bool = False
 _EXEC_LOG_LOCK: threading.Lock = threading.Lock()
 
-# ---------------------------------------------------------------------------
-# Per-worker trajectory collection (thread-local)
-# ---------------------------------------------------------------------------
-_thread_local = threading.local()
-
-
-def start_trajectory(worker_id: str, event_sink: Any | None = None) -> None:
-    """Begin collecting log events for the current thread."""
-    _thread_local.worker_id = worker_id
-    _thread_local.events = []
-    _thread_local.event_sink = event_sink
-
-
-def collect_trajectory() -> list[dict]:
-    """Return collected events and clear the buffer."""
-    events = getattr(_thread_local, "events", [])
-    _thread_local.events = []
-    _thread_local.worker_id = None
-    _thread_local.event_sink = None
-    return events
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -112,39 +91,18 @@ def log_event(event: str, **fields: Any) -> None:
     Each record includes a UTC timestamp, session ID, event name,
     and any additional keyword-argument fields (recursively sanitised
     via ``_prepare_for_log``).
-
-    If a per-worker trajectory is active on the current thread
-    (via ``start_trajectory``), a copy of the record is also appended
-    to the thread-local buffer regardless of ``EXEC_LOG_ENABLED``.
     """
+    if not EXEC_LOG_ENABLED:
+        return
+    path = _ensure_exec_log_file()
+    if path is None:
+        return
     record: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "session_id": _EXEC_LOG_SESSION_ID,
         "event": str(event or "unknown"),
     }
     record.update({k: _prepare_for_log(v) for k, v in fields.items()})
-
-    # Collect into per-worker trajectory if active
-    worker_id = getattr(_thread_local, "worker_id", None)
-    if worker_id is not None:
-        traj_events = getattr(_thread_local, "events", None)
-        if traj_events is not None:
-            traj_record = dict(record)
-            traj_record["worker_id"] = worker_id
-            traj_events.append(traj_record)
-            sink = getattr(_thread_local, "event_sink", None)
-            if callable(sink):
-                try:
-                    sink(traj_record)
-                except Exception:
-                    pass
-
-    # File logging (original behaviour)
-    if not EXEC_LOG_ENABLED:
-        return
-    path = _ensure_exec_log_file()
-    if path is None:
-        return
     line = json.dumps(record, ensure_ascii=False)
     try:
         with _EXEC_LOG_LOCK:

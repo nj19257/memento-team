@@ -8,7 +8,6 @@ litellm
 
 # MCP Client
 mcp
-fastmcp
 
 # Web Search & Crawling
 google_search_results
@@ -29,9 +28,6 @@ anyio
 
 # Dynamic CLI input/completion
 prompt_toolkit
-
-# TUI
-textual
 
 # Progress bar
 tqdm

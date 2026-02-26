@@ -1,25 +1,36 @@
 ---
 name: uv-pip-install
-description: Install missing Python packages using uv pip. Use when (1) a Python import fails with ModuleNotFoundError, (2) user asks to install a Python package, (3) a script requires a missing dependency. This skill automatically detects missing libraries and installs them in the uv-managed .venv environment.
+description: Install and manage Python packages using uv pip. Use when a Python import fails with ModuleNotFoundError, user asks to install a package, or a script requires a missing dependency.
 ---
 
 # uv-pip-install
 
-Install Python packages in the uv-managed virtual environment.
+Install and manage Python packages in the uv-managed virtual environment.
+
+## Quick start
+
+```bash
+# Install a package
+uv pip install requests
+
+# Install multiple packages
+uv pip install pandas numpy matplotlib
+
+# Install with extras
+uv pip install httpx[http2]
+
+# Check if a package is installed
+uv pip show python-docx
+
+# List all installed packages
+uv pip list
+```
 
 ## When to use
 
-- User encounters `ModuleNotFoundError: No module named 'xxx'`
+- Python import fails with `ModuleNotFoundError`
 - User asks to install a Python package
 - A script requires dependencies that are not installed
-- Need to check if a package is installed
-
-## Workflow
-
-1. If user reports an import error, extract the module name
-2. Map module name to package name if different (e.g., `cv2` -> `opencv-python`)
-3. Check if package is already installed using `uv pip show`
-4. If not installed, install using `uv pip install`
 
 ## Common module-to-package mappings
 
@@ -33,71 +44,14 @@ Install Python packages in the uv-managed virtual environment.
 | bs4 | beautifulsoup4 |
 | dotenv | python-dotenv |
 
-## Output contract (JSON only)
+## Workflow
 
-Return a single JSON object with `ops` array:
-
-```json
-{
-  "working_dir": "/path/to/project",
-  "ops": [
-    { "type": "check", "package": "package-name" },
-    { "type": "install", "package": "package-name" },
-    { "type": "install", "package": "package-name", "extras": "[extra1,extra2]" },
-    { "type": "list" }
-  ]
-}
-```
-
-### Supported ops
-
-- `check`: Check if a package is installed
-  - `package` (required): Package name to check
-- `install`: Install a package
-  - `package` (required): Package name to install
-  - `extras` (optional): Extras to install, e.g., "[dev,test]"
-- `list`: List all installed packages
-
-## Examples
-
-### Example 1: ModuleNotFoundError for docx
-
-User reports: `ModuleNotFoundError: No module named 'docx'`
-
-```json
-{
-  "working_dir": "/Users/zhou/Memento-S",
-  "ops": [
-    { "type": "check", "package": "python-docx" },
-    { "type": "install", "package": "python-docx" }
-  ]
-}
-```
-
-### Example 2: Install a package with extras
-
-```json
-{
-  "working_dir": "/Users/zhou/Memento-S",
-  "ops": [
-    { "type": "install", "package": "httpx", "extras": "[http2]" }
-  ]
-}
-```
-
-### Example 3: Check installed packages
-
-```json
-{
-  "working_dir": "/Users/zhou/Memento-S",
-  "ops": [
-    { "type": "list" }
-  ]
-}
-```
+1. If an import error occurs, extract the module name.
+2. Map module name to package name if different (see table above).
+3. Check if already installed: `uv pip show <package>`
+4. If not installed: `uv pip install <package>`
 
 ## Notes
 
-- Always use the project's working directory to ensure .venv is found
-- The skill automatically finds and uses the .venv in the project directory
-- All commands use `uv pip` to ensure packages are installed in the correct environment
+- Always run from the project directory so the correct `.venv` is used.
+- Use `uv pip` (not plain `pip`) to ensure packages go into the uv-managed environment.

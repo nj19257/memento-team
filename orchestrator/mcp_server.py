@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import asyncio
 import sys
 import time
@@ -27,22 +28,16 @@ os.chdir(_MEMENTO_S_DIR)
 
 from fastmcp import FastMCP
 
-from agent import (
-    run_one_skill_loop,
-    route_skill,
-    load_available_skills_block,
-    parse_available_skills,
-    has_local_skill_dir,
-    ensure_skill_available,
-)
-from core.workboard import write_board, read_board
-from core.utils.logging_utils import start_trajectory, collect_trajectory
+from core.mcp_agent import MCPAgent
+from core.model_factory import build_chat_model
 
 import logging
 
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 5
+WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
+WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
 
 
 def _stderr_print(*args: Any, **kwargs: Any) -> None:
@@ -55,6 +50,81 @@ def _stderr_print(*args: Any, **kwargs: Any) -> None:
 mcp = FastMCP("MementoSWorkerPool")
 
 _semaphore = asyncio.Semaphore(MAX_POOL_SIZE)
+
+
+def _workboard_write(content: str) -> Path:
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    WORKBOARD_PATH.write_text(content, encoding="utf-8")
+    return WORKBOARD_PATH
+
+
+def _workboard_read() -> str:
+    if not WORKBOARD_PATH.exists():
+        return "(no workboard exists)"
+    return WORKBOARD_PATH.read_text(encoding="utf-8")
+
+
+def _workboard_check_off_item(index_1_based: int) -> str:
+    if not WORKBOARD_PATH.exists():
+        return "check_off_item ERR: workboard does not exist"
+    content = WORKBOARD_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^(\s*-\s)\[ \](\s+{index_1_based}\b)", re.MULTILINE)
+    new_content, n = pattern.subn(r"\1[x]\2", content, count=1)
+    if n == 0:
+        return f"check_off_item SKIP: item {index_1_based} not found or already checked"
+    WORKBOARD_PATH.write_text(new_content, encoding="utf-8")
+    return f"check_off_item OK: item {index_1_based}"
+
+
+def _workboard_append_result(index_1_based: int, text: str) -> str:
+    if not WORKBOARD_PATH.exists():
+        return "append_result ERR: workboard does not exist"
+    content = WORKBOARD_PATH.read_text(encoding="utf-8")
+    one_line = " ".join(str(text).split())[:200]
+    result_line = f"- Task {index_1_based}: {one_line}"
+    marker = "## Results"
+    marker_idx = content.find(marker)
+    if marker_idx == -1:
+        content = content.rstrip() + f"\n\n{marker}\n{result_line}\n"
+    else:
+        marker_line_end = content.find("\n", marker_idx)
+        if marker_line_end == -1:
+            content += f"\n{result_line}\n"
+        else:
+            insert_pos = len(content)
+            next_section = content.find("\n##", marker_line_end + 1)
+            if next_section != -1:
+                insert_pos = next_section + 1
+            content = content[:insert_pos].rstrip() + f"\n{result_line}\n" + content[insert_pos:]
+    WORKBOARD_PATH.write_text(content, encoding="utf-8")
+    return f"append_result OK: task {index_1_based}"
+
+
+def _extract_agent_output(result: dict[str, Any] | Any) -> str:
+    """Best-effort extraction of final assistant text from MCPAgent.run()."""
+    if isinstance(result, dict):
+        messages = result.get("messages")
+        if isinstance(messages, (list, tuple)) and messages:
+            last = messages[-1]
+            content = getattr(last, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                # LangChain may return structured content blocks.
+                parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif isinstance(item, dict) and item.get("text"):
+                        parts.append(str(item.get("text")))
+                    else:
+                        parts.append(str(item))
+                text = "\n".join(p for p in parts if p).strip()
+                if text:
+                    return text
+        if isinstance(result.get("output"), str) and result.get("output").strip():
+            return str(result["output"])
+    return str(result)
 
 EXECUTE_SUBTASKS_DESCRIPTION = f"""
 Execute 1-{MAX_POOL_SIZE} independent subtasks in parallel using Memento-S agent workers.
@@ -81,56 +151,31 @@ Args:
     List of 1 to {MAX_POOL_SIZE} fully self-contained task descriptions.
   workboard: str (RECOMMENDED — always provide)
     Markdown content for a shared workboard file that lists the subtasks
-    and provides a Results section for workers to fill in. Workers can
-    read and edit it during execution via read_workboard/edit_workboard.
+    and provides a Results section. Workers receive it as read-only context.
+    The orchestrator updates the workboard after each worker finishes.
 """
 
 
-def _load_skills_catalog() -> tuple[list[dict], str, set[str]]:
-    """Load skills catalog from AGENTS.md. Returns (skills, skills_xml, skill_names)."""
-    skills_xml = load_available_skills_block()
-    skills = parse_available_skills(skills_xml)
-    skill_names = {
-        s.get("name") for s in skills if isinstance(s, dict) and s.get("name")
-    }
-    return skills, skills_xml, skill_names
+async def _execute_single_subtask(subtask: str) -> str:
+    """Run a single subtask using the new Memento-S MCPAgent."""
+    execution_text = subtask
+    board_content = _workboard_read()
+    if board_content and board_content != "(no workboard exists)":
+        execution_text = (
+            f"{subtask}\n\n"
+            "## Active Workboard (read-only context)\n"
+            "A shared workboard exists. Treat it as context only; do not attempt "
+            "to edit it. The orchestrator will update the board after you finish.\n\n"
+            f"```markdown\n{board_content}\n```"
+        )
 
-
-def _execute_single_subtask(subtask: str) -> str:
-    """Run a single subtask through Memento-S routing and execution. (sync)"""
-    skills, skills_xml, skill_names = _load_skills_catalog()
-
-    decision = route_skill(subtask, skills, skills_xml)
-    action = decision.get("action", "none")
-
-    if action == "next_step":
-        skill_name = decision.get("name", "")
-        if not isinstance(skill_name, str) or not skill_name.strip():
-            return f"Error: router returned next_step but no skill name. Decision: {decision}"
-        skill_name = skill_name.strip()
-
-        # Ensure skill is available (dynamic fetch if needed)
-        if skill_name not in skill_names and not has_local_skill_dir(skill_name):
-            ok, fetch_msg = ensure_skill_available(skill_name)
-            if not ok:
-                return f"Error: skill {skill_name!r} not found. {fetch_msg}"
-
-        # Enrich subtask with workboard context for the execution loop
-        execution_text = subtask
-        board_content = read_board()
-        if board_content and board_content != "(no workboard exists)":
-            execution_text = (
-                f"{subtask}\n\n"
-                "## Active Workboard\n"
-                "A shared workboard exists with the following content. "
-                "After completing your primary task, you MUST update the workboard "
-                "to mark your subtask as done and record your results.\n\n"
-                f"```markdown\n{board_content}\n```\n\n"
-                "Include edit_workboard ops in your plan to update it."
-            )
-        return run_one_skill_loop(execution_text, skill_name)
-    else:
-        return decision.get("reason", "No action taken.")
+    agent = MCPAgent(model=build_chat_model(), base_dir=WORKSPACE_DIR)
+    await agent.start()
+    try:
+        result = await agent.run(execution_text)
+        return _extract_agent_output(result).strip()
+    finally:
+        await agent.close()
 
 
 # ---------------------------------------------------------------------------
@@ -160,17 +205,9 @@ def _execute_single_subtask_with_trajectory(
     idx: int,
     live_path: Path | None = None,
 ) -> tuple[str, list[dict]]:
-    """Wrap _execute_single_subtask with per-worker trajectory collection."""
-    if live_path is not None:
-        start_trajectory(
-            f"worker-{idx}",
-            event_sink=lambda e, p=live_path: _append_live_trajectory_event(p, e),
-        )
-    else:
-        start_trajectory(f"worker-{idx}")
-    result = _execute_single_subtask(subtask)
-    trajectory = collect_trajectory()
-    return result, trajectory
+    """Legacy compatibility wrapper (trajectory hooks removed in new Memento-S)."""
+    _ = (subtask, idx, live_path)
+    return "", []
 
 
 def _create_live_trajectory(idx: int, subtask: str) -> Path | None:
@@ -287,9 +324,9 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                 f"Too many subtasks ({len(subtasks)}) — max is {MAX_POOL_SIZE}"
             )
 
-        # Write workboard if provided (workers discover it on their own)
+        # Write workboard if provided (workers receive a snapshot in their prompt)
         if workboard and workboard.strip():
-            board_path = write_board(workboard)
+            board_path = _workboard_write(workboard)
             _stderr_print(f"  [Workboard] Created at {board_path}")
 
         async def run_one(subtask: str, idx: int) -> Dict[str, Any]:
@@ -300,13 +337,16 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             for attempt in range(max_retries):
                 try:
                     async with _semaphore:
-                        result, trajectory = await asyncio.to_thread(
-                            _execute_single_subtask_with_trajectory, subtask, idx, live_traj_path
-                        )
+                        result = await _execute_single_subtask(subtask)
+                        trajectory = []
                     elapsed = round(time.perf_counter() - start_time, 2)
                     logger.info(
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
                     )
+                    if workboard and workboard.strip():
+                        _workboard_check_off_item(idx + 1)
+                        summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
+                        _workboard_append_result(idx + 1, summary)
                     _print_trajectory(idx, trajectory)
                     traj_path = _save_trajectory(
                         idx,
