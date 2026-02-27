@@ -114,7 +114,7 @@ class MementoTeams(App):
     }
 
     #task_controls {
-        height: 3;
+        height: auto;
         margin-bottom: 1;
     }
 
@@ -130,10 +130,14 @@ class MementoTeams(App):
     }
 
     #run_task {
+        width: 1fr;
+        min-width: 10;
         margin-bottom: 0;
     }
 
     #stop_task {
+        width: 1fr;
+        min-width: 8;
         margin-bottom: 0;
         margin-left: 1;
     }
