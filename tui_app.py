@@ -199,7 +199,7 @@ class MementoTeams(App):
         color: #f0f0f0;
     }
 
-    #board_view_bar {
+    #board_view_bar, #final_view_bar {
         height: 3;
         margin-bottom: 1;
     }
@@ -282,6 +282,8 @@ class MementoTeams(App):
         self._last_session_file_signature: list[tuple[str, int]] = []
         self._active_tab: str = "board"
         self._board_view: str = "raw"
+        self._final_view: str = "raw"
+        self._final_last_text: str = ""
         self._max_workers: int = 5
         self._session_worker_order: list[str] = []
         self._steps_filter_tool: str = ""
@@ -340,7 +342,17 @@ class MementoTeams(App):
 
                 with Vertical(id="panel_final", classes="hidden"):
                     yield Static("Final Output", id="title_final", classes="section_title")
-                    yield TextArea("", id="final_output", read_only=True)
+                    with Horizontal(id="final_view_bar"):
+                        yield Button("Raw", id="final_raw", classes="subtab_btn active_subtab", variant="primary")
+                        yield Button("Rendered", id="final_rendered", classes="subtab_btn")
+                    with Vertical(id="final_raw_panel"):
+                        yield TextArea("", id="final_output", read_only=True)
+                    with Vertical(id="final_rendered_panel", classes="hidden"):
+                        with Vertical(id="final_rendered_container"):
+                            if MarkdownViewer is not None:
+                                yield MarkdownViewer("")
+                            else:
+                                yield Static("MarkdownViewer unavailable.", id="final_rendered_fallback")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -411,6 +423,10 @@ class MementoTeams(App):
             self._set_board_view("raw")
         elif event.button.id == "board_rendered":
             self._set_board_view("rendered")
+        elif event.button.id == "final_raw":
+            self._set_final_view("raw")
+        elif event.button.id == "final_rendered":
+            self._set_final_view("rendered")
         elif event.button.id == "steps_group_toggle":
             self._steps_group_enabled = not self._steps_group_enabled
             btn = self.query_one("#steps_group_toggle", Button)
@@ -488,6 +504,8 @@ class MementoTeams(App):
             pass
         output = self.query_one("#final_output", TextArea)
         output.text = "Task stopped by user."
+        self._final_last_text = "Task stopped by user."
+        self._update_rendered_final(self._final_last_text)
         self._task_running = False
         self._running_task_handle = None
         run_btn = self.query_one("#run_task", Button)
@@ -538,13 +556,18 @@ class MementoTeams(App):
             result = await self.orchestrator.run(task)
             final = str(result.get("output", "")).strip()
             output.text = final or "(no output)"
+            self._final_last_text = final or "(no output)"
+            self._update_rendered_final(self._final_last_text)
             self._set_active_tab("final")
             self._last_session_id = self._session_id
         except asyncio.CancelledError:
             # Stopped by user — _force_stop handles UI reset
             return
         except Exception as exc:
-            output.text = f"Run failed: {exc}"
+            err_text = f"Run failed: {exc}"
+            output.text = err_text
+            self._final_last_text = err_text
+            self._update_rendered_final(self._final_last_text)
             self._last_session_id = self._session_id
         finally:
             self._task_running = False
@@ -710,6 +733,40 @@ class MementoTeams(App):
             seed = self._workboard_last_text or "(no workboard exists)"
             self._update_rendered_workboard(seed)
 
+    def _set_final_view(self, mode: str) -> None:
+        if mode not in {"raw", "rendered"}:
+            return
+        self._final_view = mode
+        raw_panel = self.query_one("#final_raw_panel", Vertical)
+        rendered_panel = self.query_one("#final_rendered_panel", Vertical)
+        raw_btn = self.query_one("#final_raw", Button)
+        rendered_btn = self.query_one("#final_rendered", Button)
+
+        raw_panel.set_class(mode != "raw", "hidden")
+        rendered_panel.set_class(mode != "rendered", "hidden")
+        raw_btn.set_class(mode == "raw", "active_subtab")
+        rendered_btn.set_class(mode == "rendered", "active_subtab")
+        raw_btn.variant = "primary" if mode == "raw" else "default"
+        rendered_btn.variant = "primary" if mode == "rendered" else "default"
+        if mode == "rendered":
+            self._update_rendered_final(self._final_last_text)
+
+    def _update_rendered_final(self, text: str) -> None:
+        if MarkdownViewer is None:
+            try:
+                fallback = self.query_one("#final_rendered_fallback", Static)
+                fallback.update(text)
+            except Exception:
+                pass
+            return
+        container = self.query_one("#final_rendered_container", Vertical)
+        try:
+            for child in list(container.children):
+                child.remove()
+        except Exception:
+            pass
+        container.mount(MarkdownViewer(self._escape_xml_tags(text)))
+
     def _refresh_selected_worker_steps(self) -> None:
         if self._selected_worker_path is None or not self._selected_worker_path.exists():
             return
@@ -786,19 +843,23 @@ class MementoTeams(App):
             board_widget.load_text(text)
             self._update_rendered_workboard(text)
 
+    @staticmethod
+    def _escape_xml_tags(text: str) -> str:
+        """Escape XML-style tags so MarkdownViewer doesn't swallow them."""
+        return re.sub(r"<(/?[A-Za-z0-9_:-]+)>", r"`<\1>`", text)
+
     def _update_rendered_workboard(self, text: str) -> None:
         if MarkdownViewer is None:
             fallback = self.query_one("#workboard_rendered_fallback", Static)
             fallback.update(text)
             return
         container = self.query_one("#workboard_rendered_container", Vertical)
-        # Replace rendered widget wholesale to avoid API/version update mismatches.
         try:
             for child in list(container.children):
                 child.remove()
         except Exception:
             pass
-        container.mount(MarkdownViewer(text))
+        container.mount(MarkdownViewer(self._escape_xml_tags(text)))
 
     def _prepare_new_session_board(self, new_session_id: str) -> None:
         """Archive previous board (if any) and start a fresh board for this session."""
