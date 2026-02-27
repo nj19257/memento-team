@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import json
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -17,11 +16,7 @@ from langchain_openai import ChatOpenAI
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Static, TextArea
-try:
-    from textual.widgets import Input
-except Exception:
-    Input = None  # type: ignore[assignment]
+from textual.widgets import Button, DataTable, Footer, Header, Input, Static, TextArea
 try:
     from textual.widgets import MarkdownViewer
 except Exception:
@@ -31,10 +26,11 @@ from orchestrator.orchestrator_agent import OrchestratorAgent
 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
-WORKBOARD_PATH = ROOT / "Memento-S" / "workspace" / ".workboard.md"
 
-# Ensure Memento-S imports resolve for workboard helpers.
-sys.path.insert(0, str(ROOT / "Memento-S"))
+# ---------------------------------------------------------------------------
+# Workboard helpers (inline — no core.workboard module in this repo)
+# ---------------------------------------------------------------------------
+WORKBOARD_PATH = ROOT / "Memento-S" / "workspace" / ".workboard.md"
 
 
 def get_board_path() -> Path:
@@ -49,7 +45,8 @@ def cleanup_board() -> None:
         pass
 
 
-class MementoTUI(App):
+class MementoTeams(App):
+    TITLE = "Memento-Teams"
     """Minimal Textual UI for running tasks and inspecting worker logs."""
 
     CSS = """
@@ -63,13 +60,14 @@ class MementoTUI(App):
 
     #left {
         width: 1fr;
-        min-width: 24;
+        min-width: 30;
+        max-width: 60;
         padding: 1;
         border: round #666666;
     }
 
     #right {
-        width: 5fr;
+        width: 3fr;
         padding: 1;
         border: round #666666;
     }
@@ -115,8 +113,24 @@ class MementoTUI(App):
         color: #dfe8f5;
     }
 
-    #run_task {
+    #task_controls {
+        height: 3;
         margin-bottom: 1;
+    }
+
+    #workers_label {
+        width: auto;
+        padding: 0 1 0 0;
+        color: #82d2ff;
+    }
+
+    #workers_count {
+        width: 12;
+        margin-right: 1;
+    }
+
+    #run_task {
+        margin-bottom: 0;
     }
 
     Button.-primary {
@@ -258,6 +272,7 @@ class MementoTUI(App):
         self._last_session_file_signature: list[tuple[str, int]] = []
         self._active_tab: str = "board"
         self._board_view: str = "raw"
+        self._max_workers: int = 5
         self._session_worker_order: list[str] = []
         self._steps_filter_tool: str = ""
         self._steps_filter_subtask_id: str = ""
@@ -270,7 +285,10 @@ class MementoTUI(App):
                 with Vertical(id="left_task"):
                     yield Static("Task", id="title_task", classes="section_title")
                     yield TextArea("", id="task_input")
-                    yield Button("Run Task", id="run_task", variant="primary")
+                    with Horizontal(id="task_controls"):
+                        yield Static("Workers:", id="workers_label")
+                        yield Input("5", id="workers_count", type="integer", max_length=3)
+                        yield Button("Run Task", id="run_task", variant="primary")
                 with Vertical(id="left_workers"):
                     yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
@@ -285,11 +303,8 @@ class MementoTUI(App):
                     yield Static("(no worker selected)", id="steps_worker_row")
                     yield Static("(select a worker to view its subtask)", id="steps_subtask")
                     with Horizontal(id="steps_filters"):
-                        if Input is not None:
-                            yield Input(placeholder="Filter tool_name (e.g. edit_workboard)", id="steps_filter_tool", classes="steps_filter_input")
-                            yield Input(placeholder="Filter subtask_id (e.g. t1)", id="steps_filter_subtask", classes="steps_filter_input")
-                        else:
-                            yield Static("Trace filters unavailable (Textual Input widget not installed)")
+                        yield Input(placeholder="Filter tool_name (e.g. edit_workboard)", id="steps_filter_tool", classes="steps_filter_input")
+                        yield Input(placeholder="Filter subtask_id (e.g. t1)", id="steps_filter_subtask", classes="steps_filter_input")
                         yield Button("Grouping: On", id="steps_group_toggle", classes="subtab_btn active_subtab", variant="primary")
                         yield Button("Clear", id="steps_filter_clear", classes="subtab_btn")
                     yield DataTable(id="steps_table")
@@ -342,6 +357,9 @@ class MementoTUI(App):
 
     async def _start_orchestrator(self) -> None:
         try:
+            if self.orchestrator is not None:
+                await self.orchestrator.close()
+                self.orchestrator = None
             load_dotenv()
             model = ChatOpenAI(
                 model=os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
@@ -354,6 +372,7 @@ class MementoTUI(App):
             child_env["MCP_QUIET_STDERR"] = "1"
             child_env.setdefault("FASTMCP_LOG_LEVEL", "ERROR")
             child_env.setdefault("FASTMCP_QUIET", "1")
+            child_env["MAX_WORKERS"] = str(self._max_workers)
             self.orchestrator = OrchestratorAgent(model=model, env=child_env)
             await self.orchestrator.start()
         except Exception:
@@ -390,17 +409,18 @@ class MementoTUI(App):
         elif event.button.id == "steps_filter_clear":
             self._steps_filter_tool = ""
             self._steps_filter_subtask_id = ""
-            if Input is not None:
-                try:
-                    self.query_one("#steps_filter_tool", Input).value = ""  # type: ignore[arg-type]
-                    self.query_one("#steps_filter_subtask", Input).value = ""  # type: ignore[arg-type]
-                except Exception:
-                    pass
+            try:
+                self.query_one("#steps_filter_tool", Input).value = ""  # type: ignore[arg-type]
+                self.query_one("#steps_filter_subtask", Input).value = ""  # type: ignore[arg-type]
+            except Exception:
+                pass
             if self._selected_worker_path is not None and self._selected_worker_path.exists():
                 self._load_worker_steps(self._selected_worker_path)
 
     def on_input_changed(self, event) -> None:  # Textual Input.Changed
         widget_id = getattr(getattr(event, "input", None), "id", None)
+        if widget_id == "workers_count":
+            return
         value = str(getattr(getattr(event, "input", None), "value", "") or "").strip()
         if widget_id == "steps_filter_tool":
             self._steps_filter_tool = value
@@ -420,7 +440,24 @@ class MementoTUI(App):
         if not task:
             return
 
+        # Read desired worker count from input.
+        try:
+            raw = self.query_one("#workers_count", Input).value.strip()
+            new_max = max(1, min(int(raw), 100))
+        except (ValueError, Exception):
+            new_max = self._max_workers
+
+        if new_max != self._max_workers:
+            self._max_workers = new_max
+            # Restart orchestrator with updated MAX_WORKERS env.
+            asyncio.create_task(self._restart_and_run(task))
+            return
+
         asyncio.create_task(self._run_task(task))
+
+    async def _restart_and_run(self, task: str) -> None:
+        await self._start_orchestrator()
+        await self._run_task(task)
 
     async def _run_task(self, task: str) -> None:
         self._task_running = True
@@ -940,7 +977,7 @@ class MementoTUI(App):
 
 
 def main() -> None:
-    MementoTUI().run()
+    MementoTeams().run()
 
 
 if __name__ == "__main__":

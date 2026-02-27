@@ -1,11 +1,23 @@
-# Memento Team
+# Memento Teams
 
 Multi-agent orchestration system that decomposes complex tasks into parallel subtasks and executes them using skill-based worker agents.
+
+## Quick Start
+
+```bash
+curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/tag-protocol/install.sh | bash
+```
+
+Then launch the TUI:
+
+```bash
+memento-teams
+```
 
 ## Architecture
 
 ```
-User Query
+User Query (TUI)
     |
     v
 Orchestrator Agent (LangChain)
@@ -30,12 +42,12 @@ Orchestrator Agent (LangChain)
 
 | File | Purpose |
 |---|---|
-| [main.py](main.py) | Entry point — initializes LLM, starts orchestrator, runs interactive loop |
+| [tui_app.py](tui_app.py) | Textual TUI — primary interface for submitting tasks and inspecting workers |
+| [cli_entry.py](cli_entry.py) | CLI entry point for the `memento-teams` command |
 | [orchestrator/orchestrator_agent.py](orchestrator/orchestrator_agent.py) | LangChain-based orchestrator that decomposes tasks and dispatches to workers via MCP |
 | [Memento-S/mcp_server.py](Memento-S/mcp_server.py) | FastMCP server exposing `execute_subtasks` tool — runs up to 5 workers in parallel |
-| [Memento-S/agent.py](Memento-S/agent.py) | Worker agent facade — re-exports all core modules, provides CLI REPL |
+| [Memento-S/agent.py](Memento-S/agent.py) | Worker agent facade — re-exports all core modules |
 | [Memento-S/core/config.py](Memento-S/core/config.py) | Centralized configuration from environment variables |
-| [Memento-S/core/llm.py](Memento-S/core/llm.py) | LLM client (OpenRouter / Anthropic-compatible endpoints) |
 | [Memento-S/core/router.py](Memento-S/core/router.py) | Skill routing — semantic pre-filter + LLM-based skill selection |
 | [Memento-S/core/skill_engine/](Memento-S/core/skill_engine/) | Skill planning, execution, catalog management, dynamic fetch |
 
@@ -53,7 +65,7 @@ Workers automatically select the best skill for each subtask via semantic routin
 
 ## How It Works
 
-1. **User** submits a task via `main.py`
+1. **User** submits a task via the TUI
 2. **Orchestrator** LLM decomposes it into self-contained subtasks
 3. **Orchestrator** calls `execute_subtasks()` on the MCP server
 4. **MCP server** runs each subtask through a Memento-S worker:
@@ -64,54 +76,57 @@ Workers automatically select the best skill for each subtask via semantic routin
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.11+
-- API keys for LLM provider and (optionally) SerpAPI
-- Textual-compatible terminal (for TUI mode)
-
-### Install Dependencies
+### One-Click Install
 
 ```bash
-# Orchestrator dependencies
-pip install langchain langchain-openai langchain-mcp-adapters fastmcp
-
-# Memento-S worker dependencies
-pip install -r Memento-S/requirements.txt
+curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/tag-protocol/install.sh | bash
 ```
 
-### Environment Variables
+The installer will:
+- Install `uv` (if not present)
+- Clone the repo (branch `tag-protocol`)
+- Install all dependencies (`Memento-S` + orchestrator)
+- Download router assets
+- Configure `.env` interactively (API keys)
+- Create the `memento-teams` command
+
+### Manual Setup
+
+Prerequisites: Python 3.12+, `uv`, git
+
+```bash
+git clone --branch tag-protocol https://github.com/nj19257/memento-team.git
+cd memento-team
+
+# Install Memento-S worker dependencies
+cd Memento-S && uv sync --python 3.12 && cd ..
+
+# Install orchestrator dependencies
+uv sync --python 3.12
+```
 
 Create a `.env` file in the project root:
 
 ```env
-# Required — LLM for orchestrator (via OpenRouter)
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=anthropic/claude-sonnet-4-5    # or any OpenRouter model
+OPENROUTER_MODEL=anthropic/claude-sonnet-4-5
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-
-# Optional — web search
 SERPAPI_API_KEY=...
-
-# Optional — debugging
-DEBUG=false
 ```
 
 ### Run
 
 ```bash
-python main.py
+memento-teams
 ```
 
-Enter a task at the prompt. The orchestrator will decompose it and dispatch to workers automatically.
-
-### Run Textual TUI
+Or directly:
 
 ```bash
-python tui_app.py
+uv run python -c "from cli_entry import main; main()"
 ```
 
-TUI capabilities:
+## TUI
 
 - Submit tasks directly from the interface (`Ctrl+Enter` or **Run Task**)
 - Session-scoped worker list from `logs/worker-*.jsonl` (current task only)
@@ -121,7 +136,7 @@ TUI capabilities:
 - Workboard history is preserved per session as `.workboard-<session_id>.md`
 - Final orchestrator output panel
 
-TUI controls:
+Controls:
 
 - `Ctrl+Enter`: Run task
 - `r`: Refresh worker list
@@ -134,7 +149,7 @@ All configuration is centralized in [Memento-S/core/config.py](Memento-S/core/co
 | Variable | Default | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | API key for LLM calls (required) |
-| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Model for Memento-S workers |
+| `OPENROUTER_MODEL` | `anthropic/claude-sonnet-4-5` | Model for Memento-S workers |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | LLM API base URL |
 | `SERPAPI_API_KEY` | — | API key for web search skill |
 | `SEMANTIC_ROUTER_ENABLED` | `true` | Enable semantic skill pre-filtering |
@@ -147,25 +162,28 @@ All configuration is centralized in [Memento-S/core/config.py](Memento-S/core/co
 
 ```
 memento-team/
-├── [main.py](main.py)                          # Entry point
-├── [tui_app.py](tui_app.py)                    # Textual TUI (task runner + live worker inspector)
-├── [orchestrator/](orchestrator/) 
-│   └── [orchestrator_agent.py](orchestrator/orchestrator_agent.py)        # LangChain orchestrator agent
-├── [Memento-S/](Memento-S/)
-│   ├── [mcp_server.py](Memento-S/mcp_server.py)                # FastMCP server (execute_subtasks)
-│   ├── [agent.py](Memento-S/agent.py)                     # Worker facade + CLI REPL
-│   ├── [core/](Memento-S/core/)
-│   │   ├── [config.py](Memento-S/core/config.py)                # Configuration & constants
-│   │   ├── [llm.py](Memento-S/core/llm.py)                   # LLM client
-│   │   ├── [router.py](Memento-S/core/router.py)                # Skill routing logic
-│   │   ├── [utils/](Memento-S/core/utils/)                   # JSON, path, logging utilities
-│   │   └── [skill_engine/](Memento-S/core/skill_engine/)            # Skill planning, execution, catalog
-│   ├── [skills/](Memento-S/skills/)                      # Built-in skills
-│   │   ├── [filesystem/](Memento-S/skills/filesystem/)
-│   │   ├── [terminal/](Memento-S/skills/terminal/)
-│   │   ├── [web-search/](Memento-S/skills/web-search/)
-│   │   ├── [uv-pip-install/](Memento-S/skills/uv-pip-install/)
-│   │   └── [skill-creator/](Memento-S/skills/skill-creator/)
-│   └── [cli/](Memento-S/cli/)                         # CLI REPL with slash commands
-└── [multiagent-workflow.md](multiagent-workflow.md)           # Detailed architecture notes
+├── install.sh                          # One-click installer
+├── pyproject.toml                      # Root project (orchestrator deps + entry point)
+├── cli_entry.py                        # memento-teams CLI entry point
+├── tui_app.py                          # Textual TUI
+├── main.py                             # Standalone entry point (non-TUI)
+├── orchestrator/
+│   └── orchestrator_agent.py           # LangChain orchestrator agent
+├── Memento-S/
+│   ├── pyproject.toml                  # Worker dependencies
+│   ├── mcp_server.py                   # FastMCP server (execute_subtasks)
+│   ├── agent.py                        # Worker facade
+│   ├── core/
+│   │   ├── config.py                   # Configuration & constants
+│   │   ├── router.py                   # Skill routing logic
+│   │   ├── utils/                      # JSON, path, logging utilities
+│   │   └── skill_engine/               # Skill planning, execution, catalog
+│   ├── skills/                         # Built-in skills
+│   │   ├── filesystem/
+│   │   ├── terminal/
+│   │   ├── web-search/
+│   │   ├── uv-pip-install/
+│   │   └── skill-creator/
+│   └── cli/                            # CLI REPL with slash commands
+└── multiagent-workflow.md              # Detailed architecture notes
 ```
