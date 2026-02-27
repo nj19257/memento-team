@@ -133,6 +133,11 @@ class MementoTeams(App):
         margin-bottom: 0;
     }
 
+    #stop_task {
+        margin-bottom: 0;
+        margin-left: 1;
+    }
+
     Button.-primary {
         background: #2f4f6f;
         color: #f0f0f0;
@@ -257,6 +262,7 @@ class MementoTeams(App):
         super().__init__()
         self.orchestrator: OrchestratorAgent | None = None
         self._task_running: bool = False
+        self._running_task_handle: asyncio.Task | None = None
         self._worker_files: list[Path] = []
         self._worker_row_key_to_path: dict[Any, Path] = {}
         self._selected_worker_path: Path | None = None
@@ -289,6 +295,7 @@ class MementoTeams(App):
                         yield Static("Workers:", id="workers_label")
                         yield Input("5", id="workers_count", type="integer", max_length=3)
                         yield Button("Run Task", id="run_task", variant="primary")
+                        yield Button("Stop", id="stop_task", variant="error", disabled=True)
                 with Vertical(id="left_workers"):
                     yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
@@ -388,6 +395,8 @@ class MementoTeams(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run_task":
             self._trigger_run_task()
+        elif event.button.id == "stop_task":
+            self._stop_task()
         elif event.button.id == "tab_board":
             self._set_active_tab("board")
         elif event.button.id == "tab_steps":
@@ -450,10 +459,40 @@ class MementoTeams(App):
         if new_max != self._max_workers:
             self._max_workers = new_max
             # Restart orchestrator with updated MAX_WORKERS env.
-            asyncio.create_task(self._restart_and_run(task))
+            self._running_task_handle = asyncio.create_task(self._restart_and_run(task))
             return
 
-        asyncio.create_task(self._run_task(task))
+        self._running_task_handle = asyncio.create_task(self._run_task(task))
+
+    def _stop_task(self) -> None:
+        if not self._task_running:
+            return
+        # Cancel the running asyncio task
+        if self._running_task_handle is not None and not self._running_task_handle.done():
+            self._running_task_handle.cancel()
+        # Kill the orchestrator MCP connection to stop workers
+        if self.orchestrator is not None:
+            asyncio.create_task(self._force_stop())
+
+    async def _force_stop(self) -> None:
+        """Close and rebuild orchestrator to kill all worker processes."""
+        try:
+            if self.orchestrator is not None:
+                await self.orchestrator.close()
+                self.orchestrator = None
+        except Exception:
+            pass
+        output = self.query_one("#final_output", TextArea)
+        output.text = "Task stopped by user."
+        self._task_running = False
+        self._running_task_handle = None
+        run_btn = self.query_one("#run_task", Button)
+        run_btn.disabled = False
+        run_btn.label = "Run Task"
+        stop_btn = self.query_one("#stop_task", Button)
+        stop_btn.disabled = True
+        # Restart orchestrator so it's ready for the next task
+        await self._start_orchestrator()
 
     async def _restart_and_run(self, task: str) -> None:
         await self._start_orchestrator()
@@ -464,6 +503,8 @@ class MementoTeams(App):
         run_btn = self.query_one("#run_task", Button)
         run_btn.disabled = True
         run_btn.label = "Task Running"
+        stop_btn = self.query_one("#stop_task", Button)
+        stop_btn.disabled = False
         output = self.query_one("#final_output", TextArea)
         output.text = "Task is running. Final output will appear here when execution completes."
 
@@ -471,6 +512,7 @@ class MementoTeams(App):
             self._task_running = False
             run_btn.disabled = False
             run_btn.label = "Run Task"
+            stop_btn.disabled = True
             return
 
         try:
@@ -494,13 +536,18 @@ class MementoTeams(App):
             output.text = final or "(no output)"
             self._set_active_tab("final")
             self._last_session_id = self._session_id
+        except asyncio.CancelledError:
+            # Stopped by user — _force_stop handles UI reset
+            return
         except Exception as exc:
             output.text = f"Run failed: {exc}"
             self._last_session_id = self._session_id
         finally:
             self._task_running = False
+            self._running_task_handle = None
             run_btn.disabled = False
             run_btn.label = "Run Task"
+            stop_btn.disabled = True
 
     def _refresh_workers(self, force: bool = False) -> None:
         all_files = sorted(
