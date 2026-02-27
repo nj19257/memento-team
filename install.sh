@@ -410,7 +410,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Use uv run — it handles the venv automatically
-uv run python -c "from cli_entry import main; main()"
+uv run python -c "from tui_app import MementoTeams; MementoTeams().run()"
 EOF
     chmod +x "$LAUNCHER"
 
@@ -465,7 +465,7 @@ print_success() {
     echo -e "    ${GREEN}memento-teams${NC}            # Launch TUI"
     echo ""
     echo -e "  ${CYAN}Or run directly:${NC}"
-    echo -e "    ${GREEN}cd $INSTALL_DIR && uv run python -c \"from cli_entry import main; main()\"${NC}"
+    echo -e "    ${GREEN}cd $INSTALL_DIR && uv run python -c \"from tui_app import MementoTeams; MementoTeams().run()\"${NC}"
     echo ""
     echo -e "  ${YELLOW}Note:${NC} If 'memento-teams' not found, restart terminal or run:"
     echo -e "        ${CYAN}source ~/.zshrc${NC} (or ~/.bashrc)"

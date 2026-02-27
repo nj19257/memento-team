@@ -43,7 +43,6 @@ Orchestrator Agent (LangChain)
 | File | Purpose |
 |---|---|
 | [tui_app.py](tui_app.py) | Textual TUI — primary interface for submitting tasks and inspecting workers |
-| [cli_entry.py](cli_entry.py) | CLI entry point for the `memento-teams` command |
 | [orchestrator/orchestrator_agent.py](orchestrator/orchestrator_agent.py) | LangChain-based orchestrator that decomposes tasks and dispatches to workers via MCP |
 | [Memento-S/mcp_server.py](Memento-S/mcp_server.py) | FastMCP server exposing `execute_subtasks` tool — runs up to 5 workers in parallel |
 | [Memento-S/agent.py](Memento-S/agent.py) | Worker agent facade — re-exports all core modules |
@@ -123,7 +122,7 @@ memento-teams
 Or directly:
 
 ```bash
-uv run python -c "from cli_entry import main; main()"
+uv run python -c "from tui_app import MementoTeams; MementoTeams().run()"
 ```
 
 ## TUI
@@ -164,7 +163,6 @@ All configuration is centralized in [Memento-S/core/config.py](Memento-S/core/co
 memento-team/
 ├── install.sh                          # One-click installer
 ├── pyproject.toml                      # Root project (orchestrator deps + entry point)
-├── cli_entry.py                        # memento-teams CLI entry point
 ├── tui_app.py                          # Textual TUI
 ├── main.py                             # Standalone entry point (non-TUI)
 ├── orchestrator/
