@@ -225,6 +225,13 @@ class MementoTeams(App):
         color: #f3e2b1;
     }
 
+    #progress_workflow {
+        height: 1fr;
+        border: round #666666;
+        padding: 0 1;
+        color: #d9e7ff;
+    }
+
     .section_title {
         margin: 0 0 1 0;
         text-style: bold;
@@ -280,7 +287,7 @@ class MementoTeams(App):
         self._session_board_path: Path | None = None
         self._last_task_running_state: bool = False
         self._last_session_file_signature: list[tuple[str, int]] = []
-        self._active_tab: str = "board"
+        self._active_tab: str = "progress"
         self._board_view: str = "raw"
         self._final_view: str = "raw"
         self._final_last_text: str = ""
@@ -307,9 +314,14 @@ class MementoTeams(App):
                     yield DataTable(id="workers_table")
             with Vertical(id="right"):
                 with Horizontal(id="tab_bar"):
-                    yield Button("Workboard", id="tab_board", classes="tab_btn active_tab")
+                    yield Button("Progress", id="tab_progress", classes="tab_btn active_tab")
+                    yield Button("Workboard", id="tab_board", classes="tab_btn")
                     yield Button("Execution Steps", id="tab_steps", classes="tab_btn")
                     yield Button("Final Output", id="tab_final", classes="tab_btn")
+
+                with Vertical(id="panel_progress"):
+                    yield Static("Workflow", id="title_progress", classes="section_title")
+                    yield TextArea("", id="progress_workflow", read_only=True)
 
                 with Vertical(id="panel_steps", classes="hidden"):
                     yield Static("Execution Steps (selected worker)", id="title_steps", classes="section_title")
@@ -367,9 +379,10 @@ class MementoTeams(App):
         self.set_interval(1.0, self._refresh_workers)
         self.set_interval(1.0, self._refresh_selected_worker_steps)
         self.set_interval(1.0, self._refresh_workboard)
+        self.set_interval(1.0, self._refresh_progress)
 
         await self._start_orchestrator()
-        self._set_active_tab("board")
+        self._set_active_tab("progress")
         self._set_board_view("raw")
         self._refresh_workers()
         self._refresh_workboard()
@@ -413,6 +426,8 @@ class MementoTeams(App):
             self._trigger_run_task()
         elif event.button.id == "stop_task":
             self._stop_task()
+        elif event.button.id == "tab_progress":
+            self._set_active_tab("progress")
         elif event.button.id == "tab_board":
             self._set_active_tab("board")
         elif event.button.id == "tab_steps":
@@ -529,6 +544,8 @@ class MementoTeams(App):
         stop_btn.disabled = False
         output = self.query_one("#final_output", TextArea)
         output.text = "Task is running. Final output will appear here when execution completes."
+        self._final_last_text = ""
+        self._set_active_tab("progress")
 
         if self.orchestrator is None:
             self._task_running = False
@@ -694,22 +711,26 @@ class MementoTeams(App):
         self._load_worker_steps(path)
 
     def _set_active_tab(self, tab: str) -> None:
-        if tab not in {"board", "steps", "final"}:
+        if tab not in {"progress", "board", "steps", "final"}:
             return
         self._active_tab = tab
 
+        panel_progress = self.query_one("#panel_progress", Vertical)
         panel_steps = self.query_one("#panel_steps", Vertical)
         panel_board = self.query_one("#panel_board", Vertical)
         panel_final = self.query_one("#panel_final", Vertical)
 
+        tab_progress = self.query_one("#tab_progress", Button)
         tab_board = self.query_one("#tab_board", Button)
         tab_steps = self.query_one("#tab_steps", Button)
         tab_final = self.query_one("#tab_final", Button)
 
+        panel_progress.set_class(tab != "progress", "hidden")
         panel_steps.set_class(tab != "steps", "hidden")
         panel_board.set_class(tab != "board", "hidden")
         panel_final.set_class(tab != "final", "hidden")
 
+        tab_progress.set_class(tab == "progress", "active_tab")
         tab_board.set_class(tab == "board", "active_tab")
         tab_steps.set_class(tab == "steps", "active_tab")
         tab_final.set_class(tab == "final", "active_tab")
@@ -842,6 +863,40 @@ class MementoTeams(App):
             self._workboard_last_text = text
             board_widget.load_text(text)
             self._update_rendered_workboard(text)
+
+    def _refresh_progress(self) -> None:
+        """Update the Progress panel with a concise workflow summary."""
+        files = self._current_session_files
+        total = len(files)
+        widget = self.query_one("#progress_workflow", TextArea)
+
+        if total == 0 and not self._task_running:
+            widget.text = ""
+            return
+
+        finished = 0
+        lines: list[str] = []
+        for idx, path in enumerate(files):
+            header = self._read_header(path)
+            subtask = self._short(str(header.get("subtask", "")).strip(), 90)
+            status = str(header.get("status", "")).strip().lower()
+            if status == "finished":
+                finished += 1
+                secs = header.get("time_taken_seconds", "?")
+                lines.append(f"  done  t{idx+1}: {subtask}  ({secs}s)")
+            elif status == "failed":
+                finished += 1
+                lines.append(f"  FAIL  t{idx+1}: {subtask}")
+            else:
+                lines.append(f"  ...   t{idx+1}: {subtask}")
+
+        header_line = f"[{finished}/{total}]"
+        if self._task_running and finished >= total and total > 0:
+            header_line += " synthesizing..."
+        elif not self._task_running and total > 0:
+            header_line += " done"
+
+        widget.text = header_line + "\n" + "\n".join(lines)
 
     @staticmethod
     def _escape_xml_tags(text: str) -> str:
