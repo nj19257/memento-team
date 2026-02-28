@@ -76,9 +76,9 @@ class MementoTeams(App):
     }
 
     #left {
-        width: 1fr;
-        min-width: 30;
-        max-width: 60;
+        layout: vertical;
+        width: 36%;
+        min-width: 36;
         padding: 1;
         border: round #666666;
     }
@@ -126,50 +126,70 @@ class MementoTeams(App):
 
     #task_input {
         height: 1fr;
+        min-height: 4;
         margin-bottom: 1;
         color: #dfe8f5;
     }
 
     #model_row {
-        height: auto;
+        height: 3;
         margin-bottom: 1;
+    }
+
+    #model_row_compact {
+        height: 4;
+        margin-bottom: 1;
+    }
+
+    .compact_field {
+        layout: vertical;
+        height: 4;
+        margin-right: 1;
     }
 
     #model_label {
         width: auto;
-        padding: 0 1 0 0;
+        height: auto;
+        padding: 0 0 0 0;
         color: #b8ddff;
     }
 
     #model_select {
         width: 1fr;
+        min-width: 12;
     }
 
     #task_controls {
-        height: auto;
+        layout: vertical;
+        height: 3;
         margin-bottom: 1;
+    }
+
+    #action_row {
+        height: 3;
     }
 
     #workers_label {
         width: auto;
-        padding: 0 1 0 0;
+        height: auto;
+        padding: 0 0 0 0;
         color: #82d2ff;
     }
 
     #workers_count {
-        width: 12;
+        width: 10;
         margin-right: 1;
     }
 
     #run_task {
         width: 1fr;
-        min-width: 10;
+        min-width: 12;
         margin-bottom: 0;
     }
 
     #stop_task {
         width: 1fr;
-        min-width: 8;
+        min-width: 10;
         margin-bottom: 0;
         margin-left: 1;
     }
@@ -190,11 +210,13 @@ class MementoTeams(App):
     }
 
     #left_task {
-        height: 1fr;
+        layout: vertical;
+        height: 2fr;
+        min-height: 18;
     }
 
     #left_workers {
-        height: 2fr;
+        height: 3fr;
     }
 
     #steps_table {
@@ -339,6 +361,7 @@ class MementoTeams(App):
         self._steps_filter_subtask_id: str = ""
         self._steps_group_enabled: bool = True
         self._webpages_last_count: int = -1
+        self._orchestrator_start_error: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -347,19 +370,22 @@ class MementoTeams(App):
                 with Vertical(id="left_task"):
                     yield Static("Task", id="title_task", classes="section_title")
                     yield TextArea("", id="task_input")
-                    with Horizontal(id="model_row"):
-                        yield Static("Model:", id="model_label")
-                        yield Select(
-                            [(label, value) for label, value in MODEL_OPTIONS],
-                            id="model_select",
-                            value=self._selected_model,
-                            allow_blank=False,
-                        )
+                    with Horizontal(id="model_row_compact"):
+                        with Vertical(classes="compact_field"):
+                            yield Static("Model:", id="model_label")
+                            yield Select(
+                                [(label, value) for label, value in MODEL_OPTIONS],
+                                id="model_select",
+                                value=self._selected_model,
+                                allow_blank=False,
+                            )
+                        with Vertical(classes="compact_field"):
+                            yield Static("Workers:", id="workers_label")
+                            yield Input("5", id="workers_count", type="integer", max_length=3)
                     with Horizontal(id="task_controls"):
-                        yield Static("Workers:", id="workers_label")
-                        yield Input("5", id="workers_count", type="integer", max_length=3)
-                        yield Button("Run Task", id="run_task", variant="primary")
-                        yield Button("Stop", id="stop_task", variant="error", disabled=True)
+                        with Horizontal(id="action_row"):
+                            yield Button("Run Task", id="run_task", variant="primary")
+                            yield Button("Stop", id="stop_task", variant="error", disabled=True)
                 with Vertical(id="left_workers"):
                     yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
@@ -472,9 +498,10 @@ class MementoTeams(App):
             child_env["MAX_WORKERS"] = str(self._max_workers)
             self.orchestrator = OrchestratorAgent(model=model, env=child_env)
             await self.orchestrator.start()
+            self._orchestrator_start_error = None
         except Exception:
-            # Keep UI minimal; runtime errors will surface when running a task.
-            pass
+            self.orchestrator = None
+            self._orchestrator_start_error = "Failed to start orchestrator. Check API env, MCP startup, and dependencies."
 
     def action_refresh_workers(self) -> None:
         self._refresh_workers(force=True)
@@ -553,6 +580,9 @@ class MementoTeams(App):
         task_input = self.query_one("#task_input", TextArea)
         task = task_input.text.strip()
         if not task:
+            output = self.query_one("#final_output", TextArea)
+            output.text = "Task input is empty."
+            self._final_last_text = output.text
             return
 
         # Read desired worker count from input.
@@ -566,6 +596,15 @@ class MementoTeams(App):
             self._max_workers = new_max
             # Restart orchestrator with updated MAX_WORKERS env.
             self._running_task_handle = asyncio.create_task(self._restart_and_run(task))
+            return
+
+        if self.orchestrator is None:
+            err = self._orchestrator_start_error or "Orchestrator is not ready."
+            output = self.query_one("#final_output", TextArea)
+            output.text = err
+            self._final_last_text = err
+            self._update_rendered_final(self._final_last_text)
+            self._set_active_tab("final")
             return
 
         self._running_task_handle = asyncio.create_task(self._run_task(task))
@@ -604,6 +643,15 @@ class MementoTeams(App):
 
     async def _restart_and_run(self, task: str) -> None:
         await self._start_orchestrator()
+        if self.orchestrator is None:
+            err = self._orchestrator_start_error or "Failed to restart orchestrator."
+            output = self.query_one("#final_output", TextArea)
+            output.text = err
+            self._final_last_text = err
+            self._update_rendered_final(self._final_last_text)
+            self._set_active_tab("final")
+            self._running_task_handle = None
+            return
         await self._run_task(task)
 
     async def _run_task(self, task: str) -> None:
@@ -619,6 +667,11 @@ class MementoTeams(App):
         self._set_active_tab("progress")
 
         if self.orchestrator is None:
+            err_text = self._orchestrator_start_error or "Run failed: orchestrator is not available."
+            output.text = err_text
+            self._final_last_text = err_text
+            self._update_rendered_final(self._final_last_text)
+            self._set_active_tab("final")
             self._task_running = False
             run_btn.disabled = False
             run_btn.label = "Run Task"
