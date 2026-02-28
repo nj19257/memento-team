@@ -196,14 +196,34 @@ Example workboard format:
 
     @staticmethod
     def _extract_output(result: Any) -> str:
-        """Best-effort extraction of the final answer from LangChain agent results."""
+        """Best-effort extraction of the final AI answer from LangChain agent results."""
         if isinstance(result, dict):
             messages = result.get("messages")
             if isinstance(messages, (list, tuple)) and messages:
-                last = messages[-1]
-                content = getattr(last, "content", None)
-                if content:
-                    return str(content)
+                # Walk backwards to find the last AIMessage with text content
+                for msg in reversed(messages):
+                    # Skip tool messages and human messages
+                    msg_type = getattr(msg, "type", None)
+                    if msg_type not in ("ai", None):
+                        continue
+                    content = getattr(msg, "content", None)
+                    if not content:
+                        continue
+                    # content can be a string or a list of content blocks
+                    if isinstance(content, str):
+                        if content.strip():
+                            return content
+                    elif isinstance(content, list):
+                        # Extract text from content blocks
+                        parts = []
+                        for block in content:
+                            if isinstance(block, str):
+                                parts.append(block)
+                            elif isinstance(block, dict) and block.get("type") == "text":
+                                parts.append(block.get("text", ""))
+                        text = "\n".join(p for p in parts if p.strip())
+                        if text.strip():
+                            return text
             if "output" in result and result["output"]:
                 return str(result["output"])
         return str(result)

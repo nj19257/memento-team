@@ -16,7 +16,7 @@ from langchain_openai import ChatOpenAI
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static, TextArea
+from textual.widgets import Button, DataTable, Footer, Header, Input, Select, Static, TextArea
 try:
     from textual.widgets import MarkdownViewer
 except Exception:
@@ -26,6 +26,23 @@ from orchestrator.orchestrator_agent import OrchestratorAgent
 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
+
+# Available models for the selector (label, value)
+# Values are exact OpenRouter model IDs — see https://openrouter.ai/models
+MODEL_OPTIONS: list[tuple[str, str]] = [
+    ("Claude Sonnet 4.6", "anthropic/claude-sonnet-4.6"),
+    ("Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
+    ("Claude Sonnet 4", "anthropic/claude-sonnet-4"),
+    ("GPT-5.1", "openai/gpt-5.1"),
+    ("GPT-5 mini", "openai/gpt-5-mini"),
+    ("GPT-4o", "openai/gpt-4o"),
+    ("GPT-4.1", "openai/gpt-4.1"),
+    ("GPT-4.1 mini", "openai/gpt-4.1-mini"),
+    ("Gemini 2.5 Pro", "google/gemini-2.5-pro"),
+    ("Gemini 2.5 Flash", "google/gemini-2.5-flash"),
+    ("DeepSeek V3", "deepseek/deepseek-chat-v3-0324"),
+    ("DeepSeek R1", "deepseek/deepseek-r1"),
+]
 
 # ---------------------------------------------------------------------------
 # Workboard helpers (inline — no core.workboard module in this repo)
@@ -111,6 +128,21 @@ class MementoTeams(App):
         height: 1fr;
         margin-bottom: 1;
         color: #dfe8f5;
+    }
+
+    #model_row {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #model_label {
+        width: auto;
+        padding: 0 1 0 0;
+        color: #b8ddff;
+    }
+
+    #model_select {
+        width: 1fr;
     }
 
     #task_controls {
@@ -232,6 +264,11 @@ class MementoTeams(App):
         color: #d9e7ff;
     }
 
+    #webpages_table {
+        height: 1fr;
+        color: #d6e4f4;
+    }
+
     .section_title {
         margin: 0 0 1 0;
         text-style: bold;
@@ -292,10 +329,16 @@ class MementoTeams(App):
         self._final_view: str = "raw"
         self._final_last_text: str = ""
         self._max_workers: int = 5
+        load_dotenv()
+        env_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+        # Use env model if it matches a known option, otherwise default
+        known_values = [v for _, v in MODEL_OPTIONS]
+        self._selected_model: str = env_model if env_model in known_values else known_values[0]
         self._session_worker_order: list[str] = []
         self._steps_filter_tool: str = ""
         self._steps_filter_subtask_id: str = ""
         self._steps_group_enabled: bool = True
+        self._webpages_last_count: int = -1
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -304,6 +347,14 @@ class MementoTeams(App):
                 with Vertical(id="left_task"):
                     yield Static("Task", id="title_task", classes="section_title")
                     yield TextArea("", id="task_input")
+                    with Horizontal(id="model_row"):
+                        yield Static("Model:", id="model_label")
+                        yield Select(
+                            [(label, value) for label, value in MODEL_OPTIONS],
+                            id="model_select",
+                            value=self._selected_model,
+                            allow_blank=False,
+                        )
                     with Horizontal(id="task_controls"):
                         yield Static("Workers:", id="workers_label")
                         yield Input("5", id="workers_count", type="integer", max_length=3)
@@ -318,6 +369,7 @@ class MementoTeams(App):
                     yield Button("Workboard", id="tab_board", classes="tab_btn")
                     yield Button("Execution Steps", id="tab_steps", classes="tab_btn")
                     yield Button("Final Output", id="tab_final", classes="tab_btn")
+                    yield Button("Web Pages", id="tab_webpages", classes="tab_btn")
 
                 with Vertical(id="panel_progress"):
                     yield Static("Workflow", id="title_progress", classes="section_title")
@@ -365,6 +417,10 @@ class MementoTeams(App):
                                 yield MarkdownViewer("")
                             else:
                                 yield Static("MarkdownViewer unavailable.", id="final_rendered_fallback")
+
+                with Vertical(id="panel_webpages", classes="hidden"):
+                    yield Static("Web Pages", id="title_webpages", classes="section_title")
+                    yield DataTable(id="webpages_table")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -376,10 +432,15 @@ class MementoTeams(App):
         steps_table.add_columns("Time", "Subtask", "Tool", "Event", "Details")
         steps_table.cursor_type = "row"
 
+        webpages_table = self.query_one("#webpages_table", DataTable)
+        webpages_table.add_columns("Worker", "URL", "Description")
+        webpages_table.cursor_type = "row"
+
         self.set_interval(1.0, self._refresh_workers)
         self.set_interval(1.0, self._refresh_selected_worker_steps)
         self.set_interval(1.0, self._refresh_workboard)
         self.set_interval(1.0, self._refresh_progress)
+        self.set_interval(2.0, self._refresh_webpages)
 
         await self._start_orchestrator()
         self._set_active_tab("progress")
@@ -398,7 +459,7 @@ class MementoTeams(App):
                 self.orchestrator = None
             load_dotenv()
             model = ChatOpenAI(
-                model=os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
+                model=self._selected_model,
                 openai_api_key=os.getenv("OPENROUTER_API_KEY"),
                 openai_api_base=os.getenv("OPENROUTER_BASE_URL"),
                 temperature=0,
@@ -434,6 +495,9 @@ class MementoTeams(App):
             self._set_active_tab("steps")
         elif event.button.id == "tab_final":
             self._set_active_tab("final")
+        elif event.button.id == "tab_webpages":
+            self._set_active_tab("webpages")
+            self._refresh_webpages()
         elif event.button.id == "board_raw":
             self._set_board_view("raw")
         elif event.button.id == "board_rendered":
@@ -460,6 +524,13 @@ class MementoTeams(App):
                 pass
             if self._selected_worker_path is not None and self._selected_worker_path.exists():
                 self._load_worker_steps(self._selected_worker_path)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "model_select" and event.value != Select.BLANK:
+            self._selected_model = str(event.value)
+            # Restart orchestrator with new model (only if not running a task)
+            if not self._task_running:
+                asyncio.create_task(self._start_orchestrator())
 
     def on_input_changed(self, event) -> None:  # Textual Input.Changed
         widget_id = getattr(getattr(event, "input", None), "id", None)
@@ -711,7 +782,7 @@ class MementoTeams(App):
         self._load_worker_steps(path)
 
     def _set_active_tab(self, tab: str) -> None:
-        if tab not in {"progress", "board", "steps", "final"}:
+        if tab not in {"progress", "board", "steps", "final", "webpages"}:
             return
         self._active_tab = tab
 
@@ -719,21 +790,25 @@ class MementoTeams(App):
         panel_steps = self.query_one("#panel_steps", Vertical)
         panel_board = self.query_one("#panel_board", Vertical)
         panel_final = self.query_one("#panel_final", Vertical)
+        panel_webpages = self.query_one("#panel_webpages", Vertical)
 
         tab_progress = self.query_one("#tab_progress", Button)
         tab_board = self.query_one("#tab_board", Button)
         tab_steps = self.query_one("#tab_steps", Button)
         tab_final = self.query_one("#tab_final", Button)
+        tab_webpages = self.query_one("#tab_webpages", Button)
 
         panel_progress.set_class(tab != "progress", "hidden")
         panel_steps.set_class(tab != "steps", "hidden")
         panel_board.set_class(tab != "board", "hidden")
         panel_final.set_class(tab != "final", "hidden")
+        panel_webpages.set_class(tab != "webpages", "hidden")
 
         tab_progress.set_class(tab == "progress", "active_tab")
         tab_board.set_class(tab == "board", "active_tab")
         tab_steps.set_class(tab == "steps", "active_tab")
         tab_final.set_class(tab == "final", "active_tab")
+        tab_webpages.set_class(tab == "webpages", "active_tab")
 
     def _set_board_view(self, mode: str) -> None:
         if mode not in {"raw", "rendered"}:
@@ -897,6 +972,47 @@ class MementoTeams(App):
             header_line += " done"
 
         widget.text = header_line + "\n" + "\n".join(lines)
+
+    _RE_URL = re.compile(r'https?://[^\s"\'\\,\)>]+')
+
+    def _refresh_webpages(self) -> None:
+        """Scan current session worker logs for URLs fetched via curl/bash_tool."""
+        if self._active_tab != "webpages":
+            return
+        table = self.query_one("#webpages_table", DataTable)
+        files = self._current_session_files
+        rows: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for idx, path in enumerate(files):
+            worker_label = f"t{idx + 1}"
+            try:
+                for line in path.read_text(errors="replace").splitlines():
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if entry.get("tool_name") != "bash_tool":
+                        continue
+                    args_raw = entry.get("args_preview", "")
+                    try:
+                        args = json.loads(args_raw)
+                    except (json.JSONDecodeError, ValueError):
+                        args = {}
+                    command = args.get("command", "")
+                    description = args.get("description", "")
+                    # Extract URLs from commands like "curl -sL https://..."
+                    if "curl" not in command and "wget" not in command:
+                        continue
+                    for url in self._RE_URL.findall(command):
+                        if url in seen:
+                            continue
+                        seen.add(url)
+                        rows.append((worker_label, url, description[:80]))
+            except Exception:
+                continue
+        table.clear(columns=False)
+        for row in rows:
+            table.add_row(*row)
 
     @staticmethod
     def _escape_xml_tags(text: str) -> str:
