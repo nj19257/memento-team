@@ -1034,7 +1034,7 @@ class MementoTeams(App):
     _RE_URL = re.compile(r'https?://[^\s"\'\\,\)>]+')
 
     def _refresh_webpages(self) -> None:
-        """Scan current session worker logs for URLs fetched via curl/bash_tool."""
+        """Scan current session worker logs for URLs surfaced by web/search tool calls."""
         if self._active_tab != "webpages":
             return
         table = self.query_one("#webpages_table", DataTable)
@@ -1049,23 +1049,49 @@ class MementoTeams(App):
                         entry = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    if entry.get("tool_name") != "bash_tool":
+                    if entry.get("event") != "tool_call_end":
+                        continue
+                    tool_name = str(entry.get("tool_name", ""))
+                    if tool_name not in {"bash_tool", "view"}:
                         continue
                     args_raw = entry.get("args_preview", "")
+                    result_raw = str(entry.get("result_preview", "") or "")
                     try:
                         args = json.loads(args_raw)
                     except (json.JSONDecodeError, ValueError):
                         args = {}
-                    command = args.get("command", "")
-                    description = args.get("description", "")
-                    # Extract URLs from commands like "curl -sL https://..."
-                    if "curl" not in command and "wget" not in command:
+
+                    description = str(args.get("description", "")).strip()
+                    texts: list[str] = []
+                    command = str(args.get("command", "") or "")
+                    if command:
+                        texts.append(command)
+                    if result_raw:
+                        texts.append(result_raw)
+                    # `view` may carry the URL under `path` in some tool variants.
+                    path_value = str(args.get("path", "") or "")
+                    if path_value:
+                        texts.append(path_value)
+
+                    found_any = False
+                    for source_text in texts:
+                        for url in self._RE_URL.findall(source_text):
+                            cleaned = url.rstrip(".,;)]}")
+                            if not cleaned or cleaned in seen:
+                                continue
+                            seen.add(cleaned)
+                            rows.append((worker_label, cleaned, description[:80] or tool_name))
+                            found_any = True
+                    if found_any:
                         continue
-                    for url in self._RE_URL.findall(command):
+
+                    # Fallback: parse SerpAPI-style result lines like `https://...\\n   snippet`.
+                    for match in re.finditer(r"https?://[^\s\\]+", result_raw):
+                        url = match.group(0).rstrip(".,;)]}")
                         if url in seen:
                             continue
                         seen.add(url)
-                        rows.append((worker_label, url, description[:80]))
+                        rows.append((worker_label, url, description[:80] or tool_name))
             except Exception:
                 continue
         table.clear(columns=False)
