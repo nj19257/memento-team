@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -499,9 +500,13 @@ class MementoTeams(App):
             self.orchestrator = OrchestratorAgent(model=model, env=child_env)
             await self.orchestrator.start()
             self._orchestrator_start_error = None
-        except Exception:
+        except Exception as exc:
             self.orchestrator = None
-            self._orchestrator_start_error = "Failed to start orchestrator. Check API env, MCP startup, and dependencies."
+            self._orchestrator_start_error = (
+                "Failed to start orchestrator.\n\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"{traceback.format_exc()}"
+            )
 
     def action_refresh_workers(self) -> None:
         self._refresh_workers(force=True)
