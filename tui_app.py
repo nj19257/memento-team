@@ -148,6 +148,23 @@ class MementoTeams(App):
         margin-right: 1;
     }
 
+    .key_field {
+        layout: vertical;
+        height: 4;
+        margin-bottom: 1;
+    }
+
+    .key_label {
+        width: auto;
+        height: auto;
+        padding: 0;
+        color: #b8ddff;
+    }
+
+    .key_input {
+        width: 1fr;
+    }
+
     #model_label {
         width: auto;
         height: auto;
@@ -353,6 +370,8 @@ class MementoTeams(App):
         self._final_last_text: str = ""
         self._max_workers: int = 5
         load_dotenv()
+        self._openrouter_key: str = os.getenv("OPENROUTER_API_KEY", "")
+        self._serpapi_key: str = os.getenv("SERPAPI_API_KEY", "")
         env_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
         # Use env model if it matches a known option, otherwise default
         known_values = [v for _, v in MODEL_OPTIONS]
@@ -383,6 +402,12 @@ class MementoTeams(App):
                         with Vertical(classes="compact_field"):
                             yield Static("Workers:", id="workers_label")
                             yield Input("5", id="workers_count", type="integer", max_length=3)
+                    with Vertical(classes="key_field"):
+                        yield Static("OpenRouter API Key:", classes="key_label")
+                        yield Input(self._openrouter_key, id="openrouter_key_input", password=True, placeholder="sk-or-...", classes="key_input")
+                    with Vertical(classes="key_field"):
+                        yield Static("SerpAPI Key:", classes="key_label")
+                        yield Input(self._serpapi_key, id="serpapi_key_input", password=True, placeholder="SerpAPI key (optional)", classes="key_input")
                     with Horizontal(id="task_controls"):
                         with Horizontal(id="action_row"):
                             yield Button("Run Task", id="run_task", variant="primary")
@@ -485,13 +510,18 @@ class MementoTeams(App):
                 await self.orchestrator.close()
                 self.orchestrator = None
             load_dotenv()
+            api_key = self._openrouter_key or os.getenv("OPENROUTER_API_KEY", "")
             model = ChatOpenAI(
                 model=self._selected_model,
-                openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+                openai_api_key=api_key,
                 openai_api_base=os.getenv("OPENROUTER_BASE_URL"),
                 temperature=0,
             )
             child_env = dict(os.environ)
+            if api_key:
+                child_env["OPENROUTER_API_KEY"] = api_key
+            if self._serpapi_key:
+                child_env["SERPAPI_API_KEY"] = self._serpapi_key
             # Prevent MCP server stderr logs from corrupting Textual rendering.
             child_env["MCP_QUIET_STDERR"] = "1"
             child_env.setdefault("FASTMCP_LOG_LEVEL", "ERROR")
@@ -507,6 +537,26 @@ class MementoTeams(App):
                 f"{type(exc).__name__}: {exc}\n\n"
                 f"{traceback.format_exc()}"
             )
+
+    def _save_env_key(self, key_name: str, key_value: str) -> None:
+        """Persist a key=value to the .env file."""
+        env_path = ROOT / ".env"
+        try:
+            if env_path.exists():
+                lines = env_path.read_text().splitlines()
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith(f"{key_name}="):
+                        lines[i] = f"{key_name}={key_value}"
+                        found = True
+                        break
+                if not found:
+                    lines.append(f"{key_name}={key_value}")
+                env_path.write_text("\n".join(lines) + "\n")
+            else:
+                env_path.write_text(f"{key_name}={key_value}\n")
+        except Exception:
+            pass
 
     def action_refresh_workers(self) -> None:
         self._refresh_workers(force=True)
@@ -567,6 +617,22 @@ class MementoTeams(App):
     def on_input_changed(self, event) -> None:  # Textual Input.Changed
         widget_id = getattr(getattr(event, "input", None), "id", None)
         if widget_id == "workers_count":
+            return
+        if widget_id == "openrouter_key_input":
+            new_key = str(getattr(getattr(event, "input", None), "value", "") or "").strip()
+            if new_key != self._openrouter_key:
+                self._openrouter_key = new_key
+                os.environ["OPENROUTER_API_KEY"] = new_key
+                self._save_env_key("OPENROUTER_API_KEY", new_key)
+                if not self._task_running:
+                    asyncio.create_task(self._start_orchestrator())
+            return
+        if widget_id == "serpapi_key_input":
+            new_key = str(getattr(getattr(event, "input", None), "value", "") or "").strip()
+            if new_key != self._serpapi_key:
+                self._serpapi_key = new_key
+                os.environ["SERPAPI_API_KEY"] = new_key
+                self._save_env_key("SERPAPI_API_KEY", new_key)
             return
         value = str(getattr(getattr(event, "input", None), "value", "") or "").strip()
         if widget_id == "steps_filter_tool":
