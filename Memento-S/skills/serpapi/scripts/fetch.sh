@@ -2,20 +2,18 @@
 set -euo pipefail
 
 # Fetch a URL and extract readable text content.
-# Usage: fetch.sh <url> [--max-chars N]
+# Usage: fetch.sh <url>
 #
 # Extracts main text from a web page, stripping HTML tags.
 # Useful after a search to get full page content from a result URL.
 
-MAX_CHARS=8000
 URL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --max-chars) MAX_CHARS="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: fetch.sh <url> [--max-chars N]"
-      echo "  Fetches a URL and extracts readable text (default max ${MAX_CHARS} chars)."
+      echo "Usage: fetch.sh <url>"
+      echo "  Fetches a URL and extracts readable text."
       exit 0
       ;;
     *) URL="$1"; shift ;;
@@ -24,7 +22,7 @@ done
 
 if [[ -z "$URL" ]]; then
   echo "Error: URL is required" >&2
-  echo "Usage: fetch.sh <url> [--max-chars N]" >&2
+  echo "Usage: fetch.sh <url>" >&2
   exit 1
 fi
 
@@ -32,7 +30,6 @@ python3 -c "
 import urllib.request, re, sys, html, ssl
 
 url = sys.argv[1]
-max_chars = int(sys.argv[2])
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
@@ -65,9 +62,5 @@ text = re.sub(r'[ \t]+', ' ', text)
 text = re.sub(r'\n\s*\n', '\n\n', text)
 text = text.strip()
 
-# Truncate
-if len(text) > max_chars:
-    text = text[:max_chars] + '\n\n[... truncated at ' + str(max_chars) + ' chars]'
-
 print(text)
-" "$URL" "$MAX_CHARS"
+" "$URL"

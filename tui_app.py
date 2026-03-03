@@ -31,6 +31,7 @@ LOGS_DIR = ROOT / "logs"
 # Available models for the selector (label, value)
 # Values are exact OpenRouter model IDs — see https://openrouter.ai/models
 MODEL_OPTIONS: list[tuple[str, str]] = [
+    ("MiniMax M2", "minimax/minimax-m2"),
     ("Claude Sonnet 4.6", "anthropic/claude-sonnet-4.6"),
     ("Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
     ("Claude Sonnet 4", "anthropic/claude-sonnet-4"),
@@ -372,7 +373,7 @@ class MementoTeams(App):
         load_dotenv()
         self._openrouter_key: str = os.getenv("OPENROUTER_API_KEY", "")
         self._serpapi_key: str = os.getenv("SERPAPI_API_KEY", "")
-        env_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+        env_model = os.getenv("OPENROUTER_MODEL", "minimax/minimax-m2")
         # Use env model if it matches a known option, otherwise default
         known_values = [v for _, v in MODEL_OPTIONS]
         self._selected_model: str = env_model if env_model in known_values else known_values[0]

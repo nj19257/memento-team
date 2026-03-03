@@ -14,14 +14,14 @@ Search Google via SerpAPI and fetch full web page content.
 Returns search result titles, URLs, and snippets.
 
 ```bash
-{baseDir}/scripts/search.sh "query here" --num 5
+{baseDir}/scripts/search.sh "query here"
 ```
 
 ### 2. `fetch.sh` — Fetch URL content
 Fetches a URL and extracts readable text. Use this after search to get full page content.
 
 ```bash
-{baseDir}/scripts/fetch.sh "https://example.com/article" --max-chars 8000
+{baseDir}/scripts/fetch.sh "https://example.com/article"
 ```
 
 ## Best practice: Search then Fetch
@@ -31,7 +31,7 @@ Fetches a URL and extracts readable text. Use this after search to get full page
 
 ```bash
 # Step 1: Search to find the right page
-{baseDir}/scripts/search.sh "Forbes billionaires 2024 top 10" --num 5
+{baseDir}/scripts/search.sh "Forbes billionaires 2024 top 10"
 
 # Step 2: Fetch the page content for complete data
 {baseDir}/scripts/fetch.sh "https://www.forbes.com/sites/.../the-top-200/"
@@ -53,14 +53,7 @@ Fetches a URL and extracts readable text. Use this after search to get full page
 | `--country` | 2-letter country code (`br`, `us`, `de`, etc.) | `us` |
 | `--lang` | Language code (`pt`, `en`, `es`, etc.) | `en` |
 | `--location` | Location string (e.g. `"São Paulo, Brazil"`) | — |
-| `--num` | Number of results | `10` |
 | `--json` | Raw JSON output | off |
-
-## Fetch options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--max-chars` | Max characters to return | `8000` |
 
 ## API key
 

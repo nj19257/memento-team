@@ -23,6 +23,12 @@ if engine == "google":
         if snippet:
             print(f"   {snippet}")
         print()
+    pagination = data.get("pagination", {}) or {}
+    next_link = pagination.get("next")
+    if next_link:
+        print("Next page:")
+        print(f"   {next_link}")
+        print()
 
 elif engine == "google_news":
     results = data.get("news_results", [])

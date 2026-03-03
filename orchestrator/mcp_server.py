@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "5")), 100))
 WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
 WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
+ORCHESTRATOR_SKILLS_DIR = (Path(__file__).resolve().parent.parent / "orchestrator_skills").resolve()
 
 
 def _stderr_print(*args: Any, **kwargs: Any) -> None:
@@ -108,6 +109,63 @@ def _workboard_uses_tag_protocol() -> bool:
     except Exception:
         return False
     return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
+
+
+def _resolve_orchestrator_skill_dir(skill_name: str | None) -> Path | None:
+    if not isinstance(skill_name, str) or not skill_name.strip():
+        return None
+    candidate = (ORCHESTRATOR_SKILLS_DIR / skill_name.strip()).resolve()
+    try:
+        candidate.relative_to(ORCHESTRATOR_SKILLS_DIR)
+    except Exception:
+        return None
+    if candidate.exists() and candidate.is_dir():
+        return candidate
+    return None
+
+
+@mcp.tool
+def read_orchestrator_skill(skill_name: str) -> str:
+    """Read an orchestrator skill's SKILL.md content from orchestrator_skills/."""
+    skill_dir = _resolve_orchestrator_skill_dir(skill_name)
+    if skill_dir is None:
+        return f"read_orchestrator_skill ERR: skill not found: {skill_name!r}"
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return f"read_orchestrator_skill ERR: missing SKILL.md for: {skill_name!r}"
+    try:
+        return skill_md.read_text(encoding="utf-8")
+    except Exception as exc:
+        return f"read_orchestrator_skill ERR: {exc}"
+
+
+@mcp.tool
+def list_orchestrator_skills() -> str:
+    """List locally available orchestrator skills from orchestrator_skills/."""
+    if not ORCHESTRATOR_SKILLS_DIR.exists():
+        return "(no orchestrator skills found)"
+    lines: list[str] = []
+    try:
+        for skill_dir in sorted(ORCHESTRATOR_SKILLS_DIR.iterdir(), key=lambda p: p.name.lower()):
+            if not skill_dir.is_dir():
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            desc = ""
+            try:
+                for raw_line in skill_md.read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith(("#", "```", "---", "-", "*", "<")):
+                        continue
+                    desc = line[:200]
+                    break
+            except Exception:
+                pass
+            lines.append(f"- {skill_dir.name}: {desc}" if desc else f"- {skill_dir.name}")
+    except Exception as exc:
+        return f"list_orchestrator_skills ERR: {exc}"
+    return "\n".join(lines) if lines else "(no orchestrator skills found)"
 
 
 def _extract_agent_output(result: dict[str, Any] | Any) -> str:
@@ -529,6 +587,8 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             "failed": [{"error": f"{type(e).__name__}: {e}"}],
             "subtasks_count": len(subtasks) if subtasks else 0,
         }
+
+
 
 
 if __name__ == "__main__":
