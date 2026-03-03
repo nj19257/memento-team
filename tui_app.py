@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 import traceback
 from pathlib import Path
@@ -128,7 +130,7 @@ class MementoTeams(App):
 
     #task_input {
         height: 1fr;
-        min-height: 4;
+        min-height: 2;
         margin-bottom: 1;
         color: #dfe8f5;
     }
@@ -180,8 +182,9 @@ class MementoTeams(App):
 
     #task_controls {
         layout: vertical;
+        dock: bottom;
         height: 3;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #action_row {
@@ -230,12 +233,14 @@ class MementoTeams(App):
 
     #left_task {
         layout: vertical;
-        height: 2fr;
-        min-height: 18;
+        height: 1fr;
+        min-height: 0;
     }
 
     #left_workers {
-        height: 3fr;
+        height: 16;
+        min-height: 4;
+        max-height: 18;
     }
 
     #steps_table {
@@ -345,6 +350,8 @@ class MementoTeams(App):
         ("q", "quit", "Quit"),
         ("r", "refresh_workers", "Refresh Workers"),
         ("ctrl+enter", "run_task", "Run Task"),
+        ("c", "copy_final_output", "Copy Final Output"),
+        ("y", "copy_worker_trace", "Copy Worker Trace"),
     ]
 
     def __init__(self) -> None:
@@ -496,6 +503,7 @@ class MementoTeams(App):
         self.set_interval(2.0, self._refresh_webpages)
 
         await self._start_orchestrator()
+        self._apply_compact_left_layout()
         self._set_active_tab("progress")
         self._set_board_view("raw")
         self._refresh_workers()
@@ -504,6 +512,55 @@ class MementoTeams(App):
     async def on_unmount(self) -> None:
         if self.orchestrator is not None:
             await self.orchestrator.close()
+
+    def on_resize(self, event) -> None:  # Textual events.Resize
+        self._apply_compact_left_layout()
+
+    def _apply_compact_left_layout(self) -> None:
+        """Keep task controls visible on short windows by shrinking the live workers pane."""
+        height = getattr(getattr(self, "size", None), "height", 0) or 0
+
+        left_task = self.query_one("#left_task", Vertical)
+        left_workers = self.query_one("#left_workers", Vertical)
+        task_input = self.query_one("#task_input", TextArea)
+        model_row = self.query_one("#model_row_compact", Horizontal)
+        task_controls = self.query_one("#task_controls", Horizontal)
+
+        key_fields = list(self.query(".key_field"))
+
+        left_task.styles.height = "1fr"
+
+        if height and height <= 28:
+            left_workers.styles.height = "3"
+            left_workers.styles.min_height = "3"
+            task_input.styles.height = "2"
+            task_input.styles.min_height = "2"
+            model_row.styles.height = "3"
+            task_controls.styles.height = "3"
+            for field in key_fields:
+                field.styles.height = "3"
+                field.styles.margin_bottom = 0
+        elif height and height <= 36:
+            left_workers.styles.height = "4"
+            left_workers.styles.min_height = "4"
+            task_input.styles.height = "3"
+            task_input.styles.min_height = "2"
+            model_row.styles.height = "4"
+            task_controls.styles.height = "3"
+            for field in key_fields:
+                field.styles.height = "4"
+                field.styles.margin_bottom = 0
+        else:
+            left_workers.styles.height = "16"
+            left_workers.styles.max_height = "18"
+            left_workers.styles.min_height = "4"
+            task_input.styles.height = "1fr"
+            task_input.styles.min_height = "2"
+            model_row.styles.height = "4"
+            task_controls.styles.height = "3"
+            for field in key_fields:
+                field.styles.height = "4"
+                field.styles.margin_bottom = 1
 
     async def _start_orchestrator(self) -> None:
         try:
@@ -564,6 +621,30 @@ class MementoTeams(App):
 
     def action_run_task(self) -> None:
         self._trigger_run_task()
+
+    def action_copy_final_output(self) -> None:
+        text = self._final_last_text.strip()
+        if not text:
+            try:
+                text = self.query_one("#final_output", TextArea).text.strip()
+            except Exception:
+                text = ""
+        if not text:
+            self._notify_copy_status("No final output to copy.", severity="warning")
+            return
+        self._copy_text_with_fallback(text, "final_output")
+
+    def action_copy_worker_trace(self) -> None:
+        path = self._selected_worker_path
+        if path is None or not path.exists():
+            self._notify_copy_status("No worker selected.", severity="warning")
+            return
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            self._notify_copy_status(f"Failed to read worker trace: {exc}", severity="error")
+            return
+        self._copy_text_with_fallback(text, path.stem)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run_task":
@@ -777,7 +858,11 @@ class MementoTeams(App):
             # Stopped by user — _force_stop handles UI reset
             return
         except Exception as exc:
-            err_text = f"Run failed: {exc}"
+            err_text = (
+                "Run failed.\n\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"{traceback.format_exc()}"
+            )
             output.text = err_text
             self._final_last_text = err_text
             self._update_rendered_final(self._final_last_text)
@@ -934,6 +1019,49 @@ class MementoTeams(App):
         tab_steps.set_class(tab == "steps", "active_tab")
         tab_final.set_class(tab == "final", "active_tab")
         tab_webpages.set_class(tab == "webpages", "active_tab")
+
+    def _copy_text_with_fallback(self, text: str, stem: str) -> None:
+        copied, detail = self._copy_to_clipboard(text)
+        if copied:
+            self._notify_copy_status(detail or "Copied to clipboard.")
+            return
+        fallback_dir = ROOT / "logs"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        fallback_path = fallback_dir / f"{stem}.copy.txt"
+        fallback_path.write_text(text, encoding="utf-8")
+        self._notify_copy_status(
+            f"Clipboard unavailable. Wrote copy to {fallback_path}.",
+            severity="warning",
+        )
+
+    def _copy_to_clipboard(self, text: str) -> tuple[bool, str]:
+        commands: list[tuple[str, list[str]]] = []
+        if shutil.which("pbcopy"):
+            commands.append(("clipboard", ["pbcopy"]))
+        if shutil.which("wl-copy"):
+            commands.append(("clipboard", ["wl-copy"]))
+        if shutil.which("xclip"):
+            commands.append(("clipboard", ["xclip", "-selection", "clipboard"]))
+        if shutil.which("xsel"):
+            commands.append(("clipboard", ["xsel", "--clipboard", "--input"]))
+        if shutil.which("clip"):
+            commands.append(("clipboard", ["clip"]))
+
+        for label, command in commands:
+            try:
+                subprocess.run(command, input=text, text=True, check=True)
+                return True, "Copied to clipboard."
+            except Exception:
+                continue
+        return False, "No clipboard command available."
+
+    def _notify_copy_status(self, message: str, severity: str = "information") -> None:
+        try:
+            self.notify(message, severity=severity)
+        except Exception:
+            output = self.query_one("#final_output", TextArea)
+            output.text = message
+            self._final_last_text = message
 
     def _set_board_view(self, mode: str) -> None:
         if mode not in {"raw", "rendered"}:
