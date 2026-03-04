@@ -1,7 +1,7 @@
 """Batch runner for WideSearch eval tasks.
 
 Usage:
-    python eval/run.py                       # Run all 10 tasks (ws_en_001~010)
+    python eval/run.py                       # Run all 20 tasks (ws_en_001~020)
     python eval/run.py --tasks ws_en_001     # Run a single task
     python eval/run.py --tasks ws_en_001 ws_en_003  # Run specific tasks
     python eval/run.py --parallel            # Run all tasks concurrently

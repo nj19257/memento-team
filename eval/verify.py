@@ -1,7 +1,7 @@
 """WideSearch verification pipeline: compress trajectory + compare with gold + error report.
 
 Usage:
-    python eval/verify.py                          # Verify all 10 tasks
+    python eval/verify.py                          # Verify all 20 tasks
     python eval/verify.py --tasks ws_en_001        # Verify single task
     python eval/verify.py --skip-compress          # Skip trajectory compression
     python eval/verify.py --skip-llm-judge         # Use exact_match fallback for llm_judge columns

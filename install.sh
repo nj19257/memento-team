@@ -20,7 +20,7 @@ REPO_URL="https://github.com/nj19257/memento-team.git"
 REPO_BRANCH="tag-protocol"
 INSTALL_DIR="${MEMENTO_TEAMS_INSTALL_DIR:-$HOME/memento-teams}"
 DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL="anthropic/claude-sonnet-4.5"
+DEFAULT_OPENROUTER_MODEL="deepseek/deepseek-v3.2"
 ROUTER_DATASET_REPO="AgentFly/router-data"
 
 print_banner() {
