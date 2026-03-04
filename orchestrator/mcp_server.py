@@ -35,7 +35,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "5")), 100))
+MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "10")), 100))
 WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
 WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
 ORCHESTRATOR_SKILLS_DIR = (Path(__file__).resolve().parent.parent / "orchestrator_skills").resolve()
@@ -127,6 +127,7 @@ def _resolve_orchestrator_skill_dir(skill_name: str | None) -> Path | None:
 @mcp.tool
 def read_orchestrator_skill(skill_name: str) -> str:
     """Read an orchestrator skill's SKILL.md content from orchestrator_skills/."""
+    _stderr_print(f"  [Orchestrator] read_orchestrator_skill({skill_name!r})")
     skill_dir = _resolve_orchestrator_skill_dir(skill_name)
     if skill_dir is None:
         return f"read_orchestrator_skill ERR: skill not found: {skill_name!r}"
@@ -134,7 +135,9 @@ def read_orchestrator_skill(skill_name: str) -> str:
     if not skill_md.exists():
         return f"read_orchestrator_skill ERR: missing SKILL.md for: {skill_name!r}"
     try:
-        return skill_md.read_text(encoding="utf-8")
+        content = skill_md.read_text(encoding="utf-8")
+        _stderr_print(f"  [Orchestrator] read_orchestrator_skill({skill_name!r}) → {len(content)} chars")
+        return content
     except Exception as exc:
         return f"read_orchestrator_skill ERR: {exc}"
 
@@ -142,6 +145,7 @@ def read_orchestrator_skill(skill_name: str) -> str:
 @mcp.tool
 def list_orchestrator_skills() -> str:
     """List locally available orchestrator skills from orchestrator_skills/."""
+    _stderr_print("  [Orchestrator] list_orchestrator_skills() called")
     if not ORCHESTRATOR_SKILLS_DIR.exists():
         return "(no orchestrator skills found)"
     lines: list[str] = []

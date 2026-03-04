@@ -5,3 +5,5 @@ __pycache__/
 logs/*.jsonl
 Memento-S/workspace/*
 Memento-S-old
+eval/outputs/
+eval/reports/

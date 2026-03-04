@@ -65,9 +65,11 @@ class OrchestratorAgent:
 
 ## YOUR JOB
 1. Receive a task from the user.
-2. Decompose it into focused, self-contained subtasks.
-3. Call `execute_subtasks` with the list of subtask strings.
-4. Synthesize the worker results into a final response.
+2. **Before decomposing**, call `list_orchestrator_skills` to check for relevant strategy guidance.
+   If a relevant skill exists (e.g. `decompose-strategy`), call `read_orchestrator_skill` to load it.
+3. Decompose the task into focused, self-contained subtasks.
+4. Call `execute_subtasks` with the list of subtask strings.
+5. Synthesize the worker results into a final response.
 
 ## DECOMPOSITION STRATEGY
 - One focused goal per subtask — maximize parallelism
@@ -122,7 +124,10 @@ Example workboard format:
 ```
 
 ## OUTPUT
-- After receiving worker results, synthesize into a clear final response
+- After receiving worker results, call `read_orchestrator_skill("verify")` to load the verification checklist.
+- Verify completeness: check row count, column coverage, and data consistency before producing the final response.
+- If gaps are found, dispatch targeted follow-up subtasks to fill them before finalizing.
+- Synthesize into a clear final response.
 """
 
     async def start(self) -> None:
