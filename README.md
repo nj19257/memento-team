@@ -5,7 +5,7 @@ Multi-agent orchestration system that decomposes complex tasks into parallel sub
 ## Quick Start
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/tag-protocol/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/demo/install.sh | bash
 ```
 
 Then launch the TUI:
@@ -78,12 +78,12 @@ Workers automatically select the best skill for each subtask via semantic routin
 ### One-Click Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/tag-protocol/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/demo/install.sh | bash
 ```
 
 The installer will:
 - Install `uv` (if not present)
-- Clone the repo (branch `tag-protocol`)
+- Clone the repo (branch `demo`)
 - Install all dependencies (`Memento-S` + orchestrator)
 - Download router assets
 - Configure `.env` interactively (API keys)
@@ -94,7 +94,7 @@ The installer will:
 Prerequisites: Python 3.12+, `uv`, git
 
 ```bash
-git clone --branch tag-protocol https://github.com/nj19257/memento-team.git
+git clone --branch demo https://github.com/nj19257/memento-team.git
 cd memento-team
 
 # Install Memento-S worker dependencies

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Memento-Teams One-Click Installer (uv version)
-# Usage: curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/tag-protocol/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/nj19257/memento-team/demo/install.sh | bash
 #        or: ./install.sh
 #
 
@@ -17,7 +17,7 @@ NC='\033[0m'
 
 # Config
 REPO_URL="https://github.com/nj19257/memento-team.git"
-REPO_BRANCH="tag-protocol"
+REPO_BRANCH="demo"
 INSTALL_DIR="${MEMENTO_TEAMS_INSTALL_DIR:-$HOME/memento-teams}"
 DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL="deepseek/deepseek-v3.2"
