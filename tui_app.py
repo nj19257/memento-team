@@ -210,6 +210,15 @@ class MementoTeams(App):
         min-width: 10;
         margin-bottom: 0;
         margin-left: 1;
+        background: #6b2020;
+        color: #f0f0f0;
+        border: round #8b3030;
+    }
+
+    #stop_task:disabled {
+        background: #3a1a1a;
+        color: #666666;
+        border: round #4a2a2a;
     }
 
     Button.-primary {
