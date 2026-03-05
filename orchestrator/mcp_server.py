@@ -35,7 +35,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "5")), 100))
+MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "10")), 100))
 WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
 WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
 

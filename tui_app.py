@@ -404,7 +404,7 @@ class MementoTeams(App):
                             )
                         with Vertical(classes="compact_field"):
                             yield Static("Workers:", id="workers_label")
-                            yield Input("5", id="workers_count", type="integer", max_length=3)
+                            yield Input("10", id="workers_count", type="integer", max_length=3)
                     with Vertical(classes="key_field"):
                         yield Static("OpenRouter API Key:", classes="key_label")
                         yield Input(self._openrouter_key, id="openrouter_key_input", password=True, placeholder="sk-or-...", classes="key_input")
@@ -415,6 +415,7 @@ class MementoTeams(App):
                         with Horizontal(id="action_row"):
                             yield Button("Run Task", id="run_task", variant="primary")
                             yield Button("Stop", id="stop_task", variant="error", disabled=True)
+                            yield Button("Clear", id="clear_task", variant="default")
                 with Vertical(id="left_workers"):
                     yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
@@ -593,6 +594,8 @@ class MementoTeams(App):
             self._trigger_run_task()
         elif event.button.id == "stop_task":
             self._stop_task()
+        elif event.button.id == "clear_task":
+            self.query_one("#task_input", TextArea).clear()
         elif event.button.id == "tab_progress":
             self._set_active_tab("progress")
         elif event.button.id == "tab_board":
@@ -775,7 +778,9 @@ class MementoTeams(App):
     def _append_orchestrator_event(self, path: Path, event: dict) -> None:
         """Append one JSON event to the orchestrator trajectory file."""
         try:
-            line = json.dumps(event, ensure_ascii=False)
+            # Exclude content_full from trajectory logs (used only for final output)
+            record = {k: v for k, v in event.items() if k != "content_full"}
+            line = json.dumps(record, ensure_ascii=False)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
@@ -844,6 +849,7 @@ class MementoTeams(App):
                             "event": "orchestrator_message",
                             "node": node_name,
                             "content_preview": self._short(content, 500),
+                            "content_full": content,
                         })
                     elif isinstance(content, list):
                         text_parts = []
@@ -859,6 +865,7 @@ class MementoTeams(App):
                                 "event": "orchestrator_message",
                                 "node": node_name,
                                 "content_preview": self._short(text, 500),
+                                "content_full": text,
                             })
                 elif msg_type == "tool":
                     tool_name = getattr(msg, "name", "")
@@ -940,7 +947,7 @@ class MementoTeams(App):
                         self._append_orchestrator_event(orch_traj_path, ev)
                     # Track last AI message for final output
                     if ev.get("event") == "orchestrator_message":
-                        last_ai_content = ev.get("content_preview", "")
+                        last_ai_content = ev.get("content_full") or ev.get("content_preview", "")
 
             # Extract final output from the last AI message
             final = last_ai_content.strip()
