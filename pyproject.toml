@@ -12,6 +12,16 @@ dependencies = [
     "langchain-core",
     "langchain-mcp-adapters",
     "langgraph",
+    "fastmcp",
+    "httpx",
+    "aiohttp",
+    "aiofiles",
+    "anyio",
+    "litellm",
+    "tiktoken",
+    "pyyaml",
+    "google_search_results",
+    "requests",
 ]
 
 [build-system]
