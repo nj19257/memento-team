@@ -420,6 +420,14 @@ Args:
     and provides tagged worker slots (e.g. <t1_result></t1_result>).
     Workers can use read_workboard/edit_workboard to fill their own tags.
     Include subtask IDs (t1, t2, ...) in the board and subtask descriptions.
+
+Returns:
+  Each result dict includes:
+  - subtask_index: int — 0-based index
+  - subtask: str — original subtask description
+  - result: str — worker output
+  - time_taken_seconds: float — execution duration
+  - trajectory_file: str | null — path to the worker's trajectory JSONL file for post-hoc analysis
 """
 
 
@@ -721,6 +729,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         "subtask": subtask,
                         "result": result,
                         "time_taken_seconds": elapsed,
+                        "trajectory_file": str(traj_path) if traj_path else None,
                     }
                 except Exception as e:
                     elapsed = round(time.perf_counter() - start_time, 2)
@@ -737,16 +746,23 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                             f"[MementoSWorkerPool] Subtask [{idx}] failed after {max_retries} attempts ({elapsed}s): {error_msg}"
                         )
                         record("worker_end", duration_seconds=elapsed, status="failed", error=error_msg)
-                        _save_trajectory(
+                        failed_traj_path = _save_trajectory(
                             idx,
                             subtask,
-                            [],
+                            trajectory,
                             error_msg,
                             elapsed,
                             status="failed",
                             path=live_traj_path,
                         )
-                        raise RuntimeError(error_msg) from e
+                        return {
+                            "subtask_index": idx,
+                            "subtask": subtask,
+                            "result": f"FAILED: {error_msg}",
+                            "time_taken_seconds": elapsed,
+                            "trajectory_file": str(failed_traj_path) if failed_traj_path else None,
+                            "failed": True,
+                        }
 
         tasks = [run_one(st, i) for i, st in enumerate(subtasks)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -756,6 +772,8 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
         for result in results:
             if isinstance(result, Exception):
                 failed.append({"error": str(result)})
+            elif isinstance(result, dict) and result.get("failed"):
+                failed.append(result)
             else:
                 successful.append(result)
 

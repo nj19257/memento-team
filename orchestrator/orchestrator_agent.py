@@ -69,6 +69,7 @@ class OrchestratorAgent:
 3. Decompose the task into focused, self-contained subtasks following the decompose-strategy skill.
 4. Call `execute_subtasks` with the list of subtask strings and a workboard following the workboard-protocol skill.
 5. Synthesize the worker results into a clear final response.
+6. **Self-Reflect (optional):** If any worker failed, took unusually long, or produced suspicious results, call `read_skill("self-evolve")` and follow its protocol to analyze worker trajectories and improve your skills for future tasks. Each result dict includes a `trajectory_file` path you can `view`.
 
 ## AVAILABLE TOOLS
 - `list_local_skills()` — list all available skills
@@ -86,7 +87,9 @@ Before decomposing any task, ALWAYS:
 3. Call `read_skill("workboard-protocol")` to load workboard format
 
 ## OUTPUT
-- After receiving worker results, synthesize into a clear final response
+- After receiving worker results, synthesize into a clear final response.
+- If you identified issues during synthesis, trigger self-reflection per step 6 AFTER delivering the final response.
+- Self-improvement happens silently — do not burden the user with internal diagnostics unless they ask.
 """
 
     async def start(self) -> None:
