@@ -1,17 +1,19 @@
-"""Self-reflection: analyze verify_report.json → generate decompose-strategy SKILL.md.
+"""Self-reflection: analyze verify_report.json → generate multiple decompose skills by task type.
 
 Usage:
     python eval/reflect.py                         # Default: read verify_report.json
     python eval/reflect.py --report path/to.json   # Custom report path
 
 Outputs:
-    orchestrator_skills/decompose-strategy/SKILL.md
+    orchestrator_skills/task-router/SKILL.md
+    orchestrator_skills/decompose-{type}/SKILL.md  (one per cluster)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,117 +27,214 @@ from eval.utils import (
     default_task_ids,
 )
 
-SKILL_OUTPUT_DIR = PROJECT_ROOT / "orchestrator_skills" / "decompose-strategy"
+SKILLS_ROOT = PROJECT_ROOT / "orchestrator_skills"
 
 
-def build_reflection_prompt(report: dict) -> str:
-    """Build the prompt for Gemini Flash to generate decomposition strategy rules."""
+def cluster_tasks(report: dict) -> list[dict]:
+    """Use LLM to cluster tasks by type based on query structure, schema, and error patterns.
 
-    summary = report.get("summary", {})
-    missing_cats = report.get("missing_categories", [])
-    incomplete_cols = report.get("incomplete_columns", {})
-    decomp_issues = report.get("decomposition_issues", [])
-    compressed_trajs = report.get("compressed_trajectories", {})
-
-    # Load task definitions for context
+    Returns a list of cluster dicts:
+    [
+        {
+            "type_name": "product-catalog",
+            "description": "Tasks requiring enumeration of products across multiple brands",
+            "instance_ids": ["ws_en_002", "ws_en_011"],
+            "decomposition_pattern": "1 worker per brand/entity"
+        },
+        ...
+    ]
+    """
     task_ids = default_task_ids()
     tasks = load_tasks(task_ids)
-    task_schemas = []
+    missing_cats = report.get("missing_categories", [])
+
+    task_summaries = []
+    for t in tasks:
+        tid = t["instance_id"]
+        eval_spec = t["evaluation"]
+        # Find missing info for this task
+        missing = next((m for m in missing_cats if m["instance_id"] == tid), None)
+        missing_count = missing["missing_count"] if missing else 0
+        total_gold = missing["total_gold"] if missing else "?"
+
+        task_summaries.append({
+            "instance_id": tid,
+            "query_preview": t["query"][:300],
+            "unique_columns": eval_spec["unique_columns"],
+            "required_columns": eval_spec.get("required", []),
+            "eval_columns": list(eval_spec.get("eval_pipeline", {}).keys()),
+            "missing_rows": f"{missing_count}/{total_gold}",
+        })
+
+    prompt = f"""You are an AI systems engineer. Analyze these 20 information-seeking tasks and cluster them into 3-5 task types based on their query structure, required data schema, and error patterns.
+
+## Tasks
+{json.dumps(task_summaries, indent=2, ensure_ascii=False)}
+
+## Instructions
+Group these tasks into 3-5 clusters. For each cluster, provide:
+1. A kebab-case type_name (e.g., "product-catalog", "timeline-events")
+2. A description of what makes this type distinct
+3. The list of instance_ids that belong to this cluster
+4. The recommended decomposition_pattern (how to split work across workers)
+
+Return ONLY valid JSON array, no markdown code fences:
+[
+  {{
+    "type_name": "example-type",
+    "description": "...",
+    "instance_ids": ["ws_en_001", ...],
+    "decomposition_pattern": "..."
+  }},
+  ...
+]
+
+Requirements:
+- Every task must appear in exactly one cluster
+- type_name must be kebab-case, max 25 chars
+- Focus on structural similarity (schema shape, data volume, temporal vs categorical)
+"""
+
+    raw = call_gemini_flash(prompt)
+    # Parse JSON from response
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*\n", "", raw)
+        raw = re.sub(r"\n```\s*$", "", raw)
+    clusters = json.loads(raw)
+    return clusters
+
+
+def generate_cluster_skill(cluster: dict, report: dict) -> str:
+    """Generate a specialized decompose SKILL.md for a single task type cluster.
+
+    Args:
+        cluster: dict with type_name, description, instance_ids, decomposition_pattern
+        report: the full verify_report.json dict
+    """
+    type_name = cluster["type_name"]
+    instance_ids = cluster["instance_ids"]
+
+    # Gather data for tasks in this cluster
+    tasks = load_tasks(instance_ids)
+    missing_cats = report.get("missing_categories", [])
+    compressed_trajs = report.get("compressed_trajectories", {})
+
+    cluster_missing = [m for m in missing_cats if m["instance_id"] in instance_ids]
+    cluster_trajs = {k: v for k, v in compressed_trajs.items() if k in instance_ids}
+
+    task_details = []
     for t in tasks:
         eval_spec = t["evaluation"]
-        task_schemas.append({
+        task_details.append({
             "instance_id": t["instance_id"],
-            "query_preview": t["query"][:200],
+            "query_preview": t["query"][:400],
             "unique_columns": eval_spec["unique_columns"],
             "required_columns": eval_spec.get("required", []),
             "eval_columns": list(eval_spec.get("eval_pipeline", {}).keys()),
         })
 
-    prompt = f"""You are an AI systems engineer analyzing evaluation results from a multi-agent orchestrator system.
+    prompt = f"""You are an AI systems engineer. Generate a specialized decomposition strategy for the following task type.
 
-## Context
-The system uses an Orchestrator Agent that decomposes tasks into subtasks dispatched to parallel workers.
-Each worker is stateless and performs web searches to fill in parts of a large information table.
-The system was evaluated on WideSearch benchmark tasks (broad information-seeking that produces markdown tables).
+## Task Type: {type_name}
+{cluster["description"]}
+Recommended pattern: {cluster["decomposition_pattern"]}
 
-## Evaluation Results Summary
-- Tasks evaluated: {summary.get('total_tasks', 0)}
-- Row recall: {summary.get('row_recall', 0):.2%} (matched/total gold rows)
-- Average cell accuracy: {summary.get('average_cell_accuracy', 0):.2%}
-- Missing rows: {summary.get('total_missing_rows', 0)}/{summary.get('total_gold_rows', 0)}
+## Tasks in This Cluster
+{json.dumps(task_details, indent=2, ensure_ascii=False)}
 
-## Error Patterns
+## Error Patterns for This Cluster
+### Missing Rows
+{json.dumps(cluster_missing, indent=2, ensure_ascii=False)[:2000]}
 
-### Missing Categories (rows not found)
-{json.dumps(missing_cats, indent=2, ensure_ascii=False)[:3000]}
+### Compressed Trajectories (how orchestrator actually decomposed these tasks)
+{json.dumps(cluster_trajs, indent=2, ensure_ascii=False)[:3000]}
 
-### Incomplete Columns (accuracy < 80%)
-{json.dumps(incomplete_cols, indent=2, ensure_ascii=False)[:2000]}
+## Generate SKILL.md
 
-### Decomposition Issues
-{json.dumps(decomp_issues, indent=2, ensure_ascii=False)[:2000]}
+Create a SKILL.md with this exact structure (no code fences around the output):
 
-### Task Schemas (what columns each task expected)
-{json.dumps(task_schemas, indent=2, ensure_ascii=False)[:3000]}
-
-### Compressed Trajectories (how the orchestrator actually decomposed tasks)
-{json.dumps(compressed_trajs, indent=2, ensure_ascii=False)[:4000]}
-
-## Your Task
-Based on the error patterns above, extract **actionable decomposition strategy rules** for the orchestrator.
-
-Generate a SKILL.md document in this exact format:
-
-```
 ---
-name: decompose-strategy
-description: Strategy guidance for decomposing broad information-seeking tasks into subtasks.
+name: decompose-{type_name}
+description: Specialized decomposition strategy for {type_name} tasks.
 ---
 
 ## When to Use
-[When should the orchestrator consult this skill]
+[Describe when the orchestrator should use this strategy — what query patterns or data shapes indicate this type]
 
-## Key Principles
-[3-5 high-level principles derived from the error analysis]
+## Decomposition Template
+[Step-by-step template for how to decompose this type of task. Be SPECIFIC with examples from the actual tasks above.]
 
-## Decomposition Rules
+## Worker Assignment Rules
+[How many workers, what each worker should cover, max rows per worker]
 
-### Rule 1: [Title]
-[Specific, actionable rule with examples]
+## Required Columns Checklist
+[List the types of columns that are commonly missed in this task type and how to ensure they're included]
 
-### Rule 2: [Title]
-...
-
-## Common Pitfalls
-[List of common mistakes to avoid, derived from the error patterns]
-
-## Verification Checklist
-[Checklist the orchestrator should run through before finalizing decomposition]
-```
+## Anti-Patterns
+[What NOT to do — based on actual failures from the error data above]
 
 Requirements:
-- Rules must be SPECIFIC and ACTIONABLE (not generic advice)
-- Reference actual error patterns from the data
-- Focus on: task splitting granularity, coverage of subcategories, data completeness per column
-- Include concrete examples where possible
-- Keep it concise (under 800 words)"""
+- Be SPECIFIC — reference actual task IDs and column names from the data
+- Include concrete examples of good vs bad decomposition
+- Keep under 600 words
+- Start with the --- frontmatter, no code fences"""
 
-    return prompt
-
-
-def generate_strategy(report: dict) -> str:
-    """Use Gemini Flash to generate the SKILL.md content from the error report."""
-    prompt = build_reflection_prompt(report)
     return call_gemini_flash(prompt)
 
 
-def clean_skill_content(raw: str) -> str:
-    """Extract the SKILL.md content from Gemini Flash's response.
+def generate_router_skill(clusters: list[dict]) -> str:
+    """Generate the task-router SKILL.md that helps the orchestrator identify the task type.
 
-    The model may wrap it in a code block.
+    Args:
+        clusters: list of cluster dicts from cluster_tasks()
     """
-    import re
+    prompt = f"""You are an AI systems engineer. Generate a task-router skill that helps an orchestrator identify which type of information-seeking task it's facing.
 
+## Available Task Types
+{json.dumps(clusters, indent=2, ensure_ascii=False)}
+
+## Generate SKILL.md
+
+Create a SKILL.md with this exact structure (no code fences around the output):
+
+---
+name: task-router
+description: Identifies the task type and directs the orchestrator to the correct decompose skill.
+---
+
+## How to Use
+1. Read the user's query
+2. Match it against the task types below
+3. Call `read_orchestrator_skill("decompose-<matched_type>")` to load the specialized strategy
+
+## Task Types
+
+[For each type, provide:]
+### <type_name>
+**Match when:** [clear criteria — what words, patterns, or structures in the query indicate this type]
+**Load skill:** `decompose-<type_name>`
+**Key signal:** [the strongest indicator — e.g., "query mentions multiple brands/products"]
+
+[Repeat for all types]
+
+## Default Fallback
+If no type matches clearly, use general decomposition principles:
+- Split by entity or category
+- Keep each worker under 30 rows
+- List all required columns in every subtask
+
+Requirements:
+- Match criteria must be concrete and unambiguous
+- Order types from most to least specific (specific matches first)
+- Keep under 400 words
+- Start with the --- frontmatter, no code fences"""
+
+    return call_gemini_flash(prompt)
+
+
+def clean_skill_content(raw: str, skill_name: str = "decompose-strategy") -> str:
+    """Extract the SKILL.md content from LLM response, stripping code fences."""
     # Try to extract from code block
     match = re.search(r"```(?:markdown|md)?\s*\n(---.*?)```", raw, re.DOTALL)
     if match:
@@ -147,15 +246,15 @@ def clean_skill_content(raw: str) -> str:
 
     # Fallback: wrap in frontmatter
     return f"""---
-name: decompose-strategy
-description: Strategy guidance for decomposing broad information-seeking tasks into subtasks.
+name: {skill_name}
+description: Auto-generated skill.
 ---
 
 {raw.strip()}"""
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WideSearch self-reflection → strategy generation")
+    parser = argparse.ArgumentParser(description="WideSearch self-reflection → multi-skill generation")
     parser.add_argument(
         "--report",
         default=None,
@@ -172,28 +271,56 @@ def main():
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
-    print(f"\nWideSearch Self-Reflection Pipeline")
+    print(f"\nWideSearch Multi-Skill Reflection Pipeline")
     print(f"  Report: {report_path}")
     print(f"  Summary: {report.get('summary', {})}")
 
-    # Generate strategy
-    print(f"\n  Generating decomposition strategy via Gemini Flash...")
-    raw_skill = generate_strategy(report)
-    skill_content = clean_skill_content(raw_skill)
+    # Step 1: Cluster tasks
+    print(f"\n  Step 1: Clustering tasks by type...")
+    clusters = cluster_tasks(report)
+    print(f"  Found {len(clusters)} task types:")
+    for c in clusters:
+        print(f"    - {c['type_name']}: {c['instance_ids']}")
 
-    # Save SKILL.md
-    SKILL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    skill_path = SKILL_OUTPUT_DIR / "SKILL.md"
-    skill_path.write_text(skill_content, encoding="utf-8")
+    # Step 2: Generate per-cluster decompose skills
+    print(f"\n  Step 2: Generating decompose skills per cluster...")
+    for c in clusters:
+        type_name = c["type_name"]
+        print(f"    Generating decompose-{type_name}...")
+        raw_skill = generate_cluster_skill(c, report)
+        skill_content = clean_skill_content(raw_skill, f"decompose-{type_name}")
 
+        skill_dir = SKILLS_ROOT / f"decompose-{type_name}"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text(skill_content, encoding="utf-8")
+        print(f"    Saved: {skill_path}")
+
+    # Step 3: Generate router skill
+    print(f"\n  Step 3: Generating task-router skill...")
+    raw_router = generate_router_skill(clusters)
+    router_content = clean_skill_content(raw_router, "task-router")
+
+    router_dir = SKILLS_ROOT / "task-router"
+    router_dir.mkdir(parents=True, exist_ok=True)
+    router_path = router_dir / "SKILL.md"
+    router_path.write_text(router_content, encoding="utf-8")
+    print(f"    Saved: {router_path}")
+
+    # Clean up old single decompose-strategy if it exists
+    old_strategy = SKILLS_ROOT / "decompose-strategy"
+    if old_strategy.exists():
+        import shutil
+        shutil.rmtree(old_strategy)
+        print(f"\n  Removed old decompose-strategy skill")
+
+    # Summary
     print(f"\n{'=' * 60}")
-    print(f"  Strategy saved: {skill_path}")
-    print(f"  Content preview:")
-    print(f"{'=' * 60}")
-    for line in skill_content.split("\n")[:30]:
-        print(f"  {line}")
-    if skill_content.count("\n") > 30:
-        print(f"  ... ({skill_content.count(chr(10)) - 30} more lines)")
+    print(f"  Multi-Skill Reflection Complete!")
+    print(f"  Generated {len(clusters)} decompose skills + 1 router skill:")
+    for c in clusters:
+        print(f"    - orchestrator_skills/decompose-{c['type_name']}/SKILL.md")
+    print(f"    - orchestrator_skills/task-router/SKILL.md")
     print(f"{'=' * 60}")
 
 

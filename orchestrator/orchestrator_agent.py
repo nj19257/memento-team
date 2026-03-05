@@ -65,11 +65,12 @@ class OrchestratorAgent:
 
 ## YOUR JOB
 1. Receive a task from the user.
-2. **Before decomposing**, call `list_orchestrator_skills` to check for relevant strategy guidance.
-   If a relevant skill exists (e.g. `decompose-strategy`), call `read_orchestrator_skill` to load it.
-3. Decompose the task into focused, self-contained subtasks.
-4. Call `execute_subtasks` with the list of subtask strings.
-5. Synthesize the worker results into a final response.
+2. Call `list_orchestrator_skills` to see available skills.
+3. Call `read_orchestrator_skill("task-router")` to identify the task type.
+4. Based on the matched type, call `read_orchestrator_skill("decompose-<type>")` to load the specialized decomposition strategy.
+5. Decompose the task following the loaded strategy.
+6. Call `execute_subtasks` with the list of subtask strings.
+7. Synthesize the worker results into a final response.
 
 ## DECOMPOSITION STRATEGY
 - One focused goal per subtask — maximize parallelism

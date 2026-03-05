@@ -159,7 +159,7 @@ async def main():
         "--tasks",
         nargs="*",
         default=None,
-        help="Task IDs to run (e.g., ws_en_001 ws_en_003). Default: all 10.",
+        help="Task IDs to run (e.g., ws_en_001 ws_en_003 or ws_en_007-ws_en_020). Default: all 20.",
     )
     parser.add_argument(
         "--parallel",
@@ -168,7 +168,16 @@ async def main():
     )
     args = parser.parse_args()
 
-    task_ids = args.tasks or default_task_ids()
+    # Expand range syntax: ws_en_007-ws_en_020 → ws_en_007 ws_en_008 ... ws_en_020
+    raw_ids = args.tasks or default_task_ids()
+    task_ids = []
+    for tid in raw_ids:
+        m = __import__("re").match(r"ws_en_(\d+)-ws_en_(\d+)$", tid)
+        if m:
+            start, end = int(m.group(1)), int(m.group(2))
+            task_ids.extend(f"ws_en_{i:03d}" for i in range(start, end + 1))
+        else:
+            task_ids.append(tid)
     tasks = load_tasks(task_ids)
 
     if not tasks:
