@@ -3,6 +3,7 @@
 __pycache__/
 .venv/
 logs/*.jsonl
+logs/*.log
 Memento-S/workspace/*
 Memento-S-old
 eval/outputs/

@@ -134,20 +134,20 @@ def generate_cluster_skill(cluster: dict, report: dict) -> str:
             "eval_columns": list(eval_spec.get("eval_pipeline", {}).keys()),
         })
 
-    prompt = f"""You are an AI systems engineer. Generate a specialized decomposition strategy for the following task type.
+    prompt = f"""You are an AI systems engineer. Based on the evaluation data below, extract GENERAL decomposition principles for this task type. The output must be a reusable strategy that works for ANY task of this type, not just the specific tasks shown here.
 
 ## Task Type: {type_name}
 {cluster["description"]}
 Recommended pattern: {cluster["decomposition_pattern"]}
 
-## Tasks in This Cluster
+## Reference Data (use to extract patterns, do NOT reference directly in output)
+### Sample Tasks in This Cluster
 {json.dumps(task_details, indent=2, ensure_ascii=False)}
 
-## Error Patterns for This Cluster
-### Missing Rows
+### Observed Error Patterns
 {json.dumps(cluster_missing, indent=2, ensure_ascii=False)[:2000]}
 
-### Compressed Trajectories (how orchestrator actually decomposed these tasks)
+### Observed Decomposition Trajectories
 {json.dumps(cluster_trajs, indent=2, ensure_ascii=False)[:3000]}
 
 ## Generate SKILL.md
@@ -160,23 +160,25 @@ description: Specialized decomposition strategy for {type_name} tasks.
 ---
 
 ## When to Use
-[Describe when the orchestrator should use this strategy — what query patterns or data shapes indicate this type]
+[Describe the GENERAL query patterns and data shapes that indicate this task type. Use abstract descriptions, not specific topics.]
 
 ## Decomposition Template
-[Step-by-step template for how to decompose this type of task. Be SPECIFIC with examples from the actual tasks above.]
+[Step-by-step template using GENERIC placeholders like "entity A", "time period X". Explain the underlying PRINCIPLE behind each step, not just what to do.]
 
 ## Worker Assignment Rules
-[How many workers, what each worker should cover, max rows per worker]
+[General rules: max rows per worker, how to partition, when to add verification workers]
 
 ## Required Columns Checklist
-[List the types of columns that are commonly missed in this task type and how to ensure they're included]
+[CATEGORIES of commonly missed columns (e.g., "secondary attributes", "temporal metadata") with generic examples. Do not list specific column names from the training data.]
 
 ## Anti-Patterns
-[What NOT to do — based on actual failures from the error data above]
+[General failure modes derived from the error data. Describe the PATTERN of failure, not specific instances. Use hypothetical examples if needed.]
 
-Requirements:
-- Be SPECIFIC — reference actual task IDs and column names from the data
-- Include concrete examples of good vs bad decomposition
+CRITICAL Requirements:
+- Do NOT reference any specific task IDs (ws_en_XXX), specific column names, specific brands, people, or topics from the training data
+- Use GENERIC examples and placeholders instead (e.g., "Brand A", "Entity X", "metric Y")
+- Extract the UNDERLYING PRINCIPLE from each observed pattern
+- The skill must be equally useful for a task the system has never seen before
 - Keep under 600 words
 - Start with the --- frontmatter, no code fences"""
 

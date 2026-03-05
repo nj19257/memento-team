@@ -41,6 +41,20 @@ WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
 ORCHESTRATOR_SKILLS_DIR = (Path(__file__).resolve().parent.parent / "orchestrator_skills").resolve()
 
 
+_ORCHESTRATOR_LOG = (Path(__file__).resolve().parent.parent / "logs" / "orchestrator.log").resolve()
+
+
+def _log_to_file(msg: str) -> None:
+    """Append a timestamped message to logs/orchestrator.log."""
+    try:
+        _ORCHESTRATOR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(_ORCHESTRATOR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+
 def _stderr_print(*args: Any, **kwargs: Any) -> None:
     """Print to stderr unless MCP quiet mode is enabled."""
     if QUIET_STDERR:
@@ -128,6 +142,7 @@ def _resolve_orchestrator_skill_dir(skill_name: str | None) -> Path | None:
 def read_orchestrator_skill(skill_name: str) -> str:
     """Read an orchestrator skill's SKILL.md content from orchestrator_skills/."""
     _stderr_print(f"  [Orchestrator] read_orchestrator_skill({skill_name!r})")
+    _log_to_file(f"read_orchestrator_skill({skill_name!r})")
     skill_dir = _resolve_orchestrator_skill_dir(skill_name)
     if skill_dir is None:
         return f"read_orchestrator_skill ERR: skill not found: {skill_name!r}"
@@ -137,6 +152,7 @@ def read_orchestrator_skill(skill_name: str) -> str:
     try:
         content = skill_md.read_text(encoding="utf-8")
         _stderr_print(f"  [Orchestrator] read_orchestrator_skill({skill_name!r}) → {len(content)} chars")
+        _log_to_file(f"read_orchestrator_skill({skill_name!r}) → {len(content)} chars")
         return content
     except Exception as exc:
         return f"read_orchestrator_skill ERR: {exc}"
@@ -146,6 +162,7 @@ def read_orchestrator_skill(skill_name: str) -> str:
 def list_orchestrator_skills() -> str:
     """List locally available orchestrator skills from orchestrator_skills/."""
     _stderr_print("  [Orchestrator] list_orchestrator_skills() called")
+    _log_to_file("list_orchestrator_skills() called")
     if not ORCHESTRATOR_SKILLS_DIR.exists():
         return "(no orchestrator skills found)"
     lines: list[str] = []
