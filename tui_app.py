@@ -416,6 +416,7 @@ class MementoTeams(App):
                             yield Button("Run Task", id="run_task", variant="primary")
                             yield Button("Stop", id="stop_task", variant="error", disabled=True)
                             yield Button("Clear", id="clear_task", variant="default")
+                            yield Select(self._load_example_options(), id="example_select", prompt="Load Example", allow_blank=True)
                 with Vertical(id="left_workers"):
                     yield Static("Workers (live)", id="title_workers", classes="section_title")
                     yield DataTable(id="workers_table")
@@ -640,6 +641,10 @@ class MementoTeams(App):
             # Restart orchestrator with new model (only if not running a task)
             if not self._task_running:
                 asyncio.create_task(self._start_orchestrator())
+        elif event.select.id == "example_select":
+            if event.value == Select.BLANK:
+                return
+            self._on_example_selected(int(event.value))
 
     def on_input_changed(self, event) -> None:  # Textual Input.Changed
         widget_id = getattr(getattr(event, "input", None), "id", None)
@@ -670,6 +675,44 @@ class MementoTeams(App):
             return
         if self._selected_worker_path is not None and self._selected_worker_path.exists():
             self._load_worker_steps(self._selected_worker_path)
+
+    @staticmethod
+    def _load_example_tasks() -> list[dict]:
+        """Load example tasks from example_task.json."""
+        example_path = ROOT / "example_task.json"
+        try:
+            with example_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [data]
+        except Exception:
+            pass
+        return []
+
+    @staticmethod
+    def _load_example_options() -> list[tuple[str, str]]:
+        """Return Select options from example_task.json."""
+        example_path = ROOT / "example_task.json"
+        try:
+            with example_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            tasks = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+        except Exception:
+            tasks = []
+        return [(t.get("task_name", f"Example {i+1}"), str(i)) for i, t in enumerate(tasks)]
+
+    def _on_example_selected(self, index: int) -> None:
+        """Load the selected example task into the task input."""
+        try:
+            tasks = self._load_example_tasks()
+            if index < len(tasks):
+                text = tasks[index].get("input", "")
+                ta = self.query_one("#task_input", TextArea)
+                ta.text = text
+        except Exception as e:
+            self.notify(f"Failed to load example: {e}", severity="error")
 
     def _trigger_run_task(self) -> None:
         if self._task_running:
