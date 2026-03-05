@@ -1,20 +1,22 @@
 ---
 name: self-evolve
-description: Self-reflection and skill improvement protocol. Analyzes worker trajectories to identify decomposition and coordination failures, then improves orchestrator skills.
+description: ALWAYS runs after receiving worker results. Reviews trajectories to spot failures or inefficiencies; improves orchestrator skills only when clear issues are found. No changes needed is the normal, expected outcome.
 ---
 
 # Self-Evolve Protocol
 
-## When to Trigger
+## When to Run
 
-After `execute_subtasks` returns, evaluate results for any of these signals:
+This protocol runs EVERY time after synthesizing worker results. Start by reviewing the trajectory headers of all workers. Most of the time, results will be fine and you should conclude with **no changes needed** — that is the normal, expected outcome.
+
+Only make skill improvements if you observe clear, actionable issues:
 - A worker **failed** (appears in the `failed` list or result starts with "FAILED:")
-- A worker took **unusually long** 
+- A worker took **unusually long** relative to task complexity
 - A worker result looks **incorrect, incomplete, or suspicious** relative to the subtask
 - Multiple workers produced **redundant or contradictory** results
 - A worker's result indicates it was **confused by the subtask description** (e.g., asked clarifying questions, did something unrelated)
 
-If none of these signals are present, skip self-evolve entirely.
+If results are decent, simply confirm "No improvements needed" and stop. Do NOT force changes when things are working well.
 
 ## Step 1: Read Worker Trajectories
 
