@@ -312,33 +312,33 @@ def edit_workboard(
     return f"edit_workboard OK: {tag_name}"
 
 
-# ===================================================================
-# 7. search_cloud_skills
-# ===================================================================
+# # ===================================================================
+# # 7. search_cloud_skills
+# # ===================================================================
 
-@mcp.tool
-def search_cloud_skills(
-    query: Annotated[str, "Search query to find matching skills"],
-    top_k: Annotated[int, "Maximum number of results to return"] = 8,
-) -> str:
-    """Search for skills in the cloud catalog."""
-    from cli.skill_search import (
-        load_cloud_skill_catalog as _load_catalog,
-        search_cloud_skills as _search,
-    )
-    entries, meta = _load_catalog()
-    if not entries:
-        err = str(meta.get("error") or "catalog unavailable")
-        return f"search_cloud_skills ERR: {err}"
-    results = _search(query, entries, top_k=top_k)
-    if not results:
-        return f"search_cloud_skills: no matches for '{query}'"
-    lines: list[str] = []
-    for item in results:
-        name = item.get("name", "")
-        desc = item.get("description", "")
-        lines.append(f"- {name}: {desc}")
-    return "\n".join(lines)
+# @mcp.tool
+# def search_cloud_skills(
+#     query: Annotated[str, "Search query to find matching skills"],
+#     top_k: Annotated[int, "Maximum number of results to return"] = 8,
+# ) -> str:
+#     """Search for skills in the cloud catalog."""
+#     from cli.skill_search import (
+#         load_cloud_skill_catalog as _load_catalog,
+#         search_cloud_skills as _search,
+#     )
+#     entries, meta = _load_catalog()
+#     if not entries:
+#         err = str(meta.get("error") or "catalog unavailable")
+#         return f"search_cloud_skills ERR: {err}"
+#     results = _search(query, entries, top_k=top_k)
+#     if not results:
+#         return f"search_cloud_skills: no matches for '{query}'"
+#     lines: list[str] = []
+#     for item in results:
+#         name = item.get("name", "")
+#         desc = item.get("description", "")
+#         lines.append(f"- {name}: {desc}")
+#     return "\n".join(lines)
 
 
 # ===================================================================

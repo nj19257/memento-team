@@ -4,12 +4,13 @@ import json
 import os
 import re
 import asyncio
+import subprocess
 import sys
 import time
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Annotated, Any, Dict, List
 
 
 def _env_truthy(name: str) -> bool:
@@ -38,6 +39,79 @@ logger = logging.getLogger(__name__)
 MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "10")), 100))
 WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
 WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
+_ORCHESTRATOR_DIR = Path(__file__).resolve().parent
+ORCHESTRATOR_SKILLS_DIR = (_ORCHESTRATOR_DIR / "skills").resolve()
+
+
+# ---------------------------------------------------------------------------
+# Path resolution helper (shared by bash_tool, str_replace, file_create, view)
+# ---------------------------------------------------------------------------
+
+def _resolve_path(raw: str) -> Path:
+    """Resolve a user-supplied path, anchoring to WORKSPACE_DIR when needed."""
+    p = Path(raw)
+    if not p.is_absolute():
+        return WORKSPACE_DIR / p
+    if p.exists() or p.parent.exists():
+        return p
+    return WORKSPACE_DIR / p.relative_to(p.anchor)
+
+
+def _view_directory(
+    path: Path,
+    max_depth: int = 2,
+    current_depth: int = 0,
+    prefix: str = "",
+) -> str:
+    lines: list[str] = []
+    if current_depth == 0:
+        lines.append(str(path) + "/")
+    try:
+        entries = sorted(
+            path.iterdir(),
+            key=lambda x: (not x.is_dir(), x.name.lower()),
+        )
+    except PermissionError:
+        return f"{prefix}[permission denied]"
+    entries = [
+        e for e in entries if not e.name.startswith(".") and e.name != "node_modules"
+    ]
+    for i, entry in enumerate(entries):
+        is_last = i == len(entries) - 1
+        connector = "└── " if is_last else "├── "
+        suffix = "/" if entry.is_dir() else ""
+        lines.append(f"{prefix}{connector}{entry.name}{suffix}")
+        if entry.is_dir() and current_depth < max_depth:
+            extension = "    " if is_last else "│   "
+            sub = _view_directory(entry, max_depth, current_depth + 1, prefix + extension)
+            if sub:
+                lines.append(sub)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Skill resolution helpers
+# ---------------------------------------------------------------------------
+
+def _iter_all_skill_roots() -> list[Path]:
+    """Return all skill roots: orchestrator's own + Memento-S roots."""
+    from core.skill_engine.skill_resolver import _iter_skill_roots
+    roots: list[Path] = [ORCHESTRATOR_SKILLS_DIR]
+    for r in _iter_skill_roots():
+        if r not in roots:
+            roots.append(r)
+    return roots
+
+
+def _resolve_skill_dir_all(skill_name: str) -> Path | None:
+    """Resolve a skill name across all roots (orchestrator + Memento-S)."""
+    if not isinstance(skill_name, str) or not skill_name.strip():
+        return None
+    for root in _iter_all_skill_roots():
+        candidate = (root / skill_name.strip()).resolve()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
 
 
 def _stderr_print(*args: Any, **kwargs: Any) -> None:
@@ -51,6 +125,190 @@ mcp = FastMCP("MementoSWorkerPool")
 
 _semaphore = asyncio.Semaphore(MAX_POOL_SIZE)
 
+
+# ===================================================================
+# Orchestrator utility tools (bash, file ops, view, skills)
+# ===================================================================
+
+@mcp.tool
+def bash_tool(
+    command: Annotated[str, "Bash command to run"],
+    description: Annotated[str, "Why I'm running this command"],
+) -> str:
+    """Run a bash command."""
+    if not command.strip():
+        return "bash_tool ERR: empty command"
+    wd = WORKSPACE_DIR
+    try:
+        wd.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", command],
+            cwd=str(wd),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=os.environ.copy(),
+        )
+    except subprocess.TimeoutExpired:
+        return f"bash_tool TIMEOUT after 120s: {command}"
+    except FileNotFoundError as exc:
+        return f"bash_tool ERR: shell not found: {exc}"
+    except Exception as exc:
+        return f"bash_tool ERR: {exc}"
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        return f"bash_tool ERR (exit {proc.returncode}):\n{stderr or stdout}"
+    return stdout or stderr or "OK"
+
+
+@mcp.tool
+def str_replace(
+    description: Annotated[str, "Why I'm making this edit"],
+    path: Annotated[str, "Path to the file to edit"],
+    old_str: Annotated[str, "String to replace (must be unique in file)"],
+    new_str: Annotated[str, "String to replace with (empty to delete)"] = "",
+) -> str:
+    """Replace a unique string in a file with another string."""
+    p = _resolve_path(path)
+    if not p.exists():
+        return f"str_replace ERR: file not found: {p}"
+    if not p.is_file():
+        return f"str_replace ERR: not a file: {p}"
+    content = p.read_text(encoding="utf-8", errors="replace")
+    count = content.count(old_str)
+    if count == 0:
+        return f"str_replace ERR: old_str not found in {p}"
+    if count > 1:
+        return f"str_replace ERR: old_str appears {count} times in {p} (must be unique)"
+    new_content = content.replace(old_str, new_str, 1)
+    p.write_text(new_content, encoding="utf-8")
+    return f"str_replace OK: {p}"
+
+
+@mcp.tool
+def file_create(
+    description: Annotated[str, "Why I'm creating this file. ALWAYS PROVIDE THIS PARAMETER FIRST."],
+    path: Annotated[str, "Path to the file to create. ALWAYS PROVIDE THIS PARAMETER SECOND."],
+    file_text: Annotated[str, "Content to write to the file. ALWAYS PROVIDE THIS PARAMETER LAST."],
+) -> str:
+    """Create a new file with content."""
+    p = _resolve_path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(file_text, encoding="utf-8")
+    return f"file_create OK: {p}"
+
+
+@mcp.tool
+def view(
+    description: Annotated[str, "Why I need to view this"],
+    path: Annotated[str, "Absolute path to file or directory"],
+    view_range: Annotated[
+        list[int] | None,
+        "Optional [start_line, end_line] (1-indexed, -1 = end of file)",
+    ] = None,
+) -> str:
+    """View a file (with line numbers) or directory listing."""
+    p = _resolve_path(path)
+    if not p.exists():
+        return f"view ERR: not found: {p}"
+    if p.is_dir():
+        return _view_directory(p, max_depth=2)
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    if p.suffix.lower() in _IMAGE_EXTS:
+        size = p.stat().st_size
+        return f"[Image file: {p} ({size} bytes)]"
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"view ERR: cannot read {p}: {exc}"
+    lines = content.splitlines()
+    if view_range is not None and len(view_range) == 2:
+        start, end = view_range
+        start = max(1, start)
+        if end == -1:
+            end = len(lines)
+        end = min(end, len(lines))
+        lines = lines[start - 1 : end]
+        offset = start
+    else:
+        offset = 1
+    numbered = [f"{offset + i:>6}\t{line}" for i, line in enumerate(lines)]
+    return "\n".join(numbered)
+
+
+@mcp.tool
+def read_skill(
+    skill_name: Annotated[str, "Name of the skill to read"],
+) -> str:
+    """Read a skill's SKILL.md content."""
+    name = str(skill_name or "").strip()
+    if not name:
+        return "read_skill ERR: empty skill name"
+    skill_dir = _resolve_skill_dir_all(name)
+    if skill_dir is None:
+        try:
+            from core.skill_engine.skill_resolver import openskills_read
+            return openskills_read(name)
+        except Exception as exc:
+            return f"read_skill ERR: {exc}"
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return f"read_skill ERR: SKILL.md not found in {skill_dir}"
+    raw = skill_md.read_text(encoding="utf-8")
+    base_dir = str(skill_dir.resolve())
+    rendered = raw.replace("{baseDir}", base_dir)
+    prefix = (
+        f"[Local skill path]\n{base_dir}\n"
+        f"[Tip]\nUse scripts from this path. For shell scripts, prefer "
+        f"`bash {base_dir}/scripts/<script>.sh ...` if direct execution fails.\n\n"
+    )
+    return prefix + rendered
+
+
+@mcp.tool
+def list_local_skills() -> str:
+    """List all locally available skills with their descriptions."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for root in _iter_all_skill_roots():
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for skill_dir in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                if not skill_dir.is_dir():
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    continue
+                name = skill_dir.name
+                if name in seen:
+                    continue
+                seen.add(name)
+                desc = ""
+                try:
+                    for raw_line in skill_md.read_text(encoding="utf-8").splitlines():
+                        line = raw_line.strip()
+                        if not line or line.startswith("#") or line.startswith("```") or line.startswith("---"):
+                            continue
+                        if line.startswith("-") or line.startswith("*") or line.startswith("<"):
+                            continue
+                        desc = line[:200]
+                        break
+                except Exception:
+                    pass
+                lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+        except Exception:
+            continue
+    return "\n".join(lines) if lines else "(no local skills found)"
+
+
+# ===================================================================
+# Workboard helpers
+# ===================================================================
 
 def _workboard_write(content: str) -> Path:
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
