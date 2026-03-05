@@ -527,6 +527,7 @@ class MementoTeams(App):
                 temperature=0,
             )
             child_env = dict(os.environ)
+            child_env["OPENROUTER_MODEL"] = self._selected_model
             if api_key:
                 child_env["OPENROUTER_API_KEY"] = api_key
             if self._serpapi_key:
