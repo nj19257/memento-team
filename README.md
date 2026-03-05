@@ -122,7 +122,7 @@ memento-teams
 Or directly:
 
 ```bash
-uv run --project Memento-S --with textual --with rich python -c "import sys; sys.path.insert(0, '.'); from tui_app import MementoTeams; MementoTeams().run()"
+uv run --python 3.12 --project Memento-S --with textual --with rich python -c "import sys; sys.path.insert(0, '.'); from tui_app import MementoTeams; MementoTeams().run()"
 ```
 
 ## TUI

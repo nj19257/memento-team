@@ -39,6 +39,7 @@ MODEL_OPTIONS: list[tuple[str, str]] = [
     ("GPT-4o", "openai/gpt-4o"),
     ("GPT-4.1", "openai/gpt-4.1"),
     ("GPT-4.1 mini", "openai/gpt-4.1-mini"),
+    ("Gemini 3 Flash Preview", "google/gemini-3-flash-preview"),
     ("Gemini 2.5 Pro", "google/gemini-2.5-pro"),
     ("Gemini 2.5 Flash", "google/gemini-2.5-flash"),
     ("DeepSeek V3", "deepseek/deepseek-chat-v3-0324"),
@@ -344,6 +345,7 @@ class MementoTeams(App):
         ("q", "quit", "Quit"),
         ("r", "refresh_workers", "Refresh Workers"),
         ("ctrl+enter", "run_task", "Run Task"),
+        ("c", "copy_final", "Copy Final Output"),
     ]
 
     def __init__(self) -> None:
@@ -372,7 +374,7 @@ class MementoTeams(App):
         load_dotenv()
         self._openrouter_key: str = os.getenv("OPENROUTER_API_KEY", "")
         self._serpapi_key: str = os.getenv("SERPAPI_API_KEY", "")
-        env_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+        env_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
         # Use env model if it matches a known option, otherwise default
         known_values = [v for _, v in MODEL_OPTIONS]
         self._selected_model: str = env_model if env_model in known_values else known_values[0]
@@ -382,6 +384,7 @@ class MementoTeams(App):
         self._steps_group_enabled: bool = True
         self._webpages_last_count: int = -1
         self._orchestrator_start_error: str | None = None
+        self._orchestrator_traj_path: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -564,6 +567,27 @@ class MementoTeams(App):
     def action_run_task(self) -> None:
         self._trigger_run_task()
 
+    def action_copy_final(self) -> None:
+        """Copy final output text to system clipboard."""
+        text = self._final_last_text
+        if not text:
+            self.notify("No final output to copy.", severity="warning")
+            return
+        import subprocess
+        try:
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+            self.notify("Final output copied to clipboard.")
+        except Exception:
+            try:
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=text.encode("utf-8"),
+                    check=True,
+                )
+                self.notify("Final output copied to clipboard.")
+            except Exception:
+                self.notify("Failed to copy — no clipboard tool found.", severity="error")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run_task":
             self._trigger_run_task()
@@ -725,6 +749,132 @@ class MementoTeams(App):
             return
         await self._run_task(task)
 
+    def _create_orchestrator_trajectory(self, task: str) -> Path | None:
+        """Create an orchestrator trajectory JSONL file with a live header."""
+        try:
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            filename = f"orchestrator-{ts}.jsonl"
+            path = LOGS_DIR / filename
+            header = {
+                "type": "header",
+                "worker_index": -1,
+                "subtask": task,
+                "status": "live",
+                "result_preview": "",
+                "time_taken_seconds": 0.0,
+                "total_events": 0,
+                "ts": ts,
+            }
+            with path.open("w", encoding="utf-8") as f:
+                f.write(json.dumps(header, ensure_ascii=False) + "\n")
+            return path
+        except Exception:
+            return None
+
+    def _append_orchestrator_event(self, path: Path, event: dict) -> None:
+        """Append one JSON event to the orchestrator trajectory file."""
+        try:
+            line = json.dumps(event, ensure_ascii=False)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    def _finalize_orchestrator_trajectory(
+        self,
+        path: Path,
+        task: str,
+        events: list[dict],
+        result: str,
+        elapsed: float,
+        status: str = "finished",
+    ) -> None:
+        """Rewrite the orchestrator trajectory file with final header."""
+        try:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            header = {
+                "type": "header",
+                "worker_index": -1,
+                "subtask": task,
+                "status": status,
+                "result_preview": result[:500],
+                "time_taken_seconds": elapsed,
+                "total_events": len(events),
+                "ts": ts,
+            }
+            with path.open("w", encoding="utf-8") as f:
+                f.write(json.dumps(header, ensure_ascii=False) + "\n")
+                for ev in events:
+                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _parse_stream_chunk(self, chunk: dict) -> list[dict]:
+        """Parse a LangChain astream(stream_mode='updates') chunk into trajectory events."""
+        events: list[dict] = []
+        ts = datetime.now(timezone.utc).isoformat()
+        for node_name, node_data in chunk.items():
+            messages = None
+            if isinstance(node_data, dict):
+                messages = node_data.get("messages")
+            if not isinstance(messages, (list, tuple)):
+                continue
+            for msg in messages:
+                msg_type = getattr(msg, "type", None)
+                if msg_type == "ai":
+                    content = getattr(msg, "content", "")
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                            tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                            events.append({
+                                "ts": ts,
+                                "event": "orchestrator_tool_call",
+                                "node": node_name,
+                                "tool_name": str(tc_name),
+                                "tool_call_id": str(tc_id),
+                                "args_preview": self._short(json.dumps(tc_args, ensure_ascii=False, default=str), 500),
+                            })
+                    if isinstance(content, str) and content.strip():
+                        events.append({
+                            "ts": ts,
+                            "event": "orchestrator_message",
+                            "node": node_name,
+                            "content_preview": self._short(content, 500),
+                        })
+                    elif isinstance(content, list):
+                        text_parts = []
+                        for block in content:
+                            if isinstance(block, str):
+                                text_parts.append(block)
+                            elif isinstance(block, dict) and block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                        text = "\n".join(p for p in text_parts if p.strip())
+                        if text.strip():
+                            events.append({
+                                "ts": ts,
+                                "event": "orchestrator_message",
+                                "node": node_name,
+                                "content_preview": self._short(text, 500),
+                            })
+                elif msg_type == "tool":
+                    tool_name = getattr(msg, "name", "")
+                    tool_content = getattr(msg, "content", "")
+                    tool_call_id = getattr(msg, "tool_call_id", "")
+                    content_str = tool_content if isinstance(tool_content, str) else json.dumps(tool_content, ensure_ascii=False, default=str)
+                    events.append({
+                        "ts": ts,
+                        "event": "orchestrator_tool_result",
+                        "node": node_name,
+                        "tool_name": str(tool_name),
+                        "tool_call_id": str(tool_call_id),
+                        "result_preview": self._short(content_str, 500),
+                    })
+        return events
+
     async def _run_task(self, task: str) -> None:
         self._task_running = True
         run_btn = self.query_one("#run_task", Button)
@@ -756,7 +906,11 @@ class MementoTeams(App):
             self._session_file_baseline = {
                 p.name
                 for p in LOGS_DIR.glob("worker-*.jsonl")
+                if p.name.startswith("worker-")
             }
+            self._session_file_baseline.update(
+                p.name for p in LOGS_DIR.glob("orchestrator-*.jsonl")
+            )
             self._current_session_files = []
             self._session_worker_order = []
             self._selected_worker_path = None
@@ -765,8 +919,38 @@ class MementoTeams(App):
             self.query_one("#steps_subtask", Static).update("(select a worker to view its subtask)")
             self.query_one("#steps_table", DataTable).clear(columns=False)
 
-            result = await self.orchestrator.run(task)
-            final = str(result.get("output", "")).strip()
+            # Create orchestrator trajectory file
+            orch_traj_path = self._create_orchestrator_trajectory(task)
+            self._orchestrator_traj_path = orch_traj_path
+            orch_events: list[dict] = []
+            start_ts = datetime.now(timezone.utc).isoformat()
+            start_event = {"ts": start_ts, "event": "orchestrator_start", "task": task}
+            orch_events.append(start_event)
+            if orch_traj_path:
+                self._append_orchestrator_event(orch_traj_path, start_event)
+
+            # Use streaming to capture orchestrator trajectory
+            final = ""
+            last_ai_content = ""
+            async for chunk in self.orchestrator.stream(task):
+                parsed = self._parse_stream_chunk(chunk)
+                for ev in parsed:
+                    orch_events.append(ev)
+                    if orch_traj_path:
+                        self._append_orchestrator_event(orch_traj_path, ev)
+                    # Track last AI message for final output
+                    if ev.get("event") == "orchestrator_message":
+                        last_ai_content = ev.get("content_preview", "")
+
+            # Extract final output from the last AI message
+            final = last_ai_content.strip()
+
+            elapsed = round(time.time() - self._session_started_at, 2)
+            end_event = {"ts": datetime.now(timezone.utc).isoformat(), "event": "orchestrator_end", "status": "ok", "duration_seconds": elapsed}
+            orch_events.append(end_event)
+            if orch_traj_path:
+                self._finalize_orchestrator_trajectory(orch_traj_path, task, orch_events, final, elapsed, status="finished")
+
             output.text = final or "(no output)"
             self._final_last_text = final or "(no output)"
             self._update_rendered_final(self._final_last_text)
@@ -776,7 +960,12 @@ class MementoTeams(App):
             # Stopped by user — _force_stop handles UI reset
             return
         except Exception as exc:
-            err_text = f"Run failed: {exc}"
+            err_text = f"Run failed: {exc}\n\n{traceback.format_exc()}"
+            elapsed = round(time.time() - self._session_started_at, 2)
+            end_event = {"ts": datetime.now(timezone.utc).isoformat(), "event": "orchestrator_end", "status": "failed", "error": str(exc), "duration_seconds": elapsed}
+            if self._orchestrator_traj_path:
+                self._append_orchestrator_event(self._orchestrator_traj_path, end_event)
+                self._finalize_orchestrator_trajectory(self._orchestrator_traj_path, task, [], err_text, elapsed, status="failed")
             output.text = err_text
             self._final_last_text = err_text
             self._update_rendered_final(self._final_last_text)
@@ -789,10 +978,15 @@ class MementoTeams(App):
             stop_btn.disabled = True
 
     def _refresh_workers(self, force: bool = False) -> None:
-        all_files = sorted(
+        worker_files = sorted(
             LOGS_DIR.glob("worker-*.jsonl"),
             key=lambda p: p.stat().st_mtime,
         )
+        orch_files = sorted(
+            LOGS_DIR.glob("orchestrator-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        all_files = worker_files + orch_files
         self._worker_files = all_files
 
         if self._session_id is None:
@@ -811,6 +1005,8 @@ class MementoTeams(App):
         for name in new_names:
             self._session_worker_order.append(name)
         self._session_worker_order = [n for n in self._session_worker_order if n in by_name]
+        # Sort orchestrator files first, then workers
+        self._session_worker_order.sort(key=lambda n: (0 if n.startswith("orchestrator-") else 1, n))
         files = [by_name[n] for n in self._session_worker_order]
 
         file_signature = [
@@ -856,12 +1052,15 @@ class MementoTeams(App):
             else:
                 events = header.get("total_events", "?")
                 seconds = header.get("time_taken_seconds", "?")
+            is_orchestrator = path.name.startswith("orchestrator-")
             if worker_status == "live":
                 status_cell: str | Text = Text("running", style="bold #61d47a")
             elif worker_status == "finished":
                 status_cell = Text("finished", style="bold #ef6b73")
             else:
                 status_cell = Text(worker_status, style="bold #ef6b73")
+            if is_orchestrator:
+                worker_label = Text(worker_label, style="bold #f2c57a")
             subtask = str(header.get("subtask", ""))
             subtask = self._short(subtask, 70)
             row_key = path.name
@@ -1066,16 +1265,41 @@ class MementoTeams(App):
     def _refresh_progress(self) -> None:
         """Update the Progress panel with a concise workflow summary."""
         files = self._current_session_files
-        total = len(files)
         widget = self.query_one("#progress_workflow", TextArea)
 
-        if total == 0 and not self._task_running:
+        # Separate orchestrator and worker files
+        orch_files = [p for p in files if p.name.startswith("orchestrator-")]
+        worker_files = [p for p in files if p.name.startswith("worker-")]
+        total = len(worker_files)
+
+        if total == 0 and not orch_files and not self._task_running:
             widget.text = ""
             return
 
-        finished = 0
         lines: list[str] = []
-        for idx, path in enumerate(files):
+
+        # Orchestrator status
+        for path in orch_files:
+            header = self._read_header(path)
+            status = str(header.get("status", "")).strip().lower()
+            task_preview = self._short(str(header.get("subtask", "")).strip(), 80)
+            if status == "live":
+                # Count events for progress indication
+                event_count = self._live_event_count(path)
+                now = time.time()
+                secs = self._live_elapsed_seconds(header, path, now)
+                lines.append(f"  ...   orchestrator: {task_preview}  ({secs}s, {event_count} events)")
+            elif status == "finished":
+                secs = header.get("time_taken_seconds", "?")
+                lines.append(f"  done  orchestrator: {task_preview}  ({secs}s)")
+            elif status == "failed":
+                lines.append(f"  FAIL  orchestrator: {task_preview}")
+            else:
+                lines.append(f"  ...   orchestrator: {task_preview}")
+
+        # Worker status
+        finished = 0
+        for idx, path in enumerate(worker_files):
             header = self._read_header(path)
             subtask = self._short(str(header.get("subtask", "")).strip(), 90)
             status = str(header.get("status", "")).strip().lower()
@@ -1089,7 +1313,7 @@ class MementoTeams(App):
             else:
                 lines.append(f"  ...   t{idx+1}: {subtask}")
 
-        header_line = f"[{finished}/{total}]"
+        header_line = f"[{finished}/{total}]" if total > 0 else "[0/0]"
         if self._task_running and finished >= total and total > 0:
             header_line += " synthesizing..."
         elif not self._task_running and total > 0:
@@ -1212,6 +1436,10 @@ class MementoTeams(App):
 
     @staticmethod
     def _worker_and_ts_from_file(path: Path) -> tuple[str, str]:
+        # orchestrator-20260217T143202Z.jsonl
+        m_orch = re.match(r"orchestrator-([^.]+)\.jsonl$", path.name)
+        if m_orch:
+            return "orchestrator", m_orch.group(1)
         # worker-3-20260217T143202Z.jsonl
         m = re.match(r"worker-(\d+)-([^.]+)\.jsonl$", path.name)
         if not m:
@@ -1384,6 +1612,17 @@ class MementoTeams(App):
             return cls._short(f"attempt={event.get('attempt')} error={event.get('error', '')}", 140)
         if name == "worker_end":
             return cls._short(f"status={event.get('status')} sec={event.get('duration_seconds')}", 140)
+        # Orchestrator events
+        if name == "orchestrator_start":
+            return cls._short(f"task={event.get('task', '')}", 140)
+        if name == "orchestrator_message":
+            return cls._short(f"[{event.get('node', '')}] {event.get('content_preview', '')}", 140)
+        if name == "orchestrator_tool_call":
+            return cls._short(f"[{event.get('node', '')}] {event.get('tool_name', '')} args={event.get('args_preview', '')}", 140)
+        if name == "orchestrator_tool_result":
+            return cls._short(f"[{event.get('node', '')}] {event.get('tool_name', '')} result={event.get('result_preview', '')}", 140)
+        if name == "orchestrator_end":
+            return cls._short(f"status={event.get('status')} sec={event.get('duration_seconds')}", 140)
 
         # Generic fallback: include compact JSON without very large fields.
         compact = {
@@ -1399,7 +1638,12 @@ class MementoTeams(App):
 
     @staticmethod
     def _event_subtask_id(event: dict[str, Any]) -> str:
-        return str(event.get("subtask_id") or "").strip()
+        sid = str(event.get("subtask_id") or "").strip()
+        if sid:
+            return sid
+        # For orchestrator events, use node name as a pseudo-subtask-id
+        node = str(event.get("node") or "").strip()
+        return node
 
     @staticmethod
     def _short(text: str, max_len: int = 120) -> str:
