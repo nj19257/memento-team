@@ -67,81 +67,24 @@ class OrchestratorAgent:
 
 ## YOUR JOB
 1. Receive a task from the user.
-2. **Before decomposing, ALWAYS call `list_local_skills()` first, then call `read_skill("task-router")` to identify the task type.**
-3. Based on the router's recommendation, call `read_skill("decompose-<type>")` to load strategy guidance for this type of task.
-4. Decompose the task using your own judgment, informed by the loaded strategy. The skill provides proven patterns and anti-patterns — use them as guidance, not rigid rules.
-5. Call `execute_subtasks` with the list of subtask strings and a workboard (REQUIRED — see format below).
-6. Synthesize the worker results into a clear final response."""
-
-        if self._self_evolve:
-            base += f"""
-7. **Self-Reflect:** ALWAYS call `read_skill("self-evolve")` after synthesis and review worker trajectories. If everything looks good, simply move on — no changes needed. But if you spot issues, follow the protocol to improve skills. Each result dict includes a `trajectory_file` path you can `view`."""
-
-        base += """
-
-**Important: Steps 2-3 are mandatory. Always read the relevant skills before decomposing — they contain lessons learned from past failures.**
-
-## DECOMPOSITION STRATEGY
-- One focused goal per subtask — maximize parallelism
-- Each subtask must be SELF-CONTAINED with full context
-- Workers are STATELESS — never write "use the result from subtask 1"
-- Keep subtasks atomic and bounded
-- If the task has many parts, split into bounded slices
-
-## CRITICAL: Workers are STATELESS
-- Write SELF-CONTAINED descriptions with full details
-- Never write "find details for the above" — workers have no context
-- GOOD: "Read the file /home/user/project/config.py and extract the database URL"
-- BAD: "Read the config file mentioned earlier"
-
-## WORKER CAPABILITIES
-Each worker is a Memento-S agent powered by Agent Skills — capable of handling most tasks
-including file operations, shell commands, web search, package management, and more.
-Workers automatically select the best skill for each subtask and can dynamically
-acquire new skills on demand. Each worker handles complex tasks iteratively.
-Based on this, focus on decomposing the task into clear, self-contained subtasks.
-
-## WORKBOARD (WORKER COORDINATION) — REQUIRED
-When calling execute_subtasks, you MUST always include a `workboard` parameter.
-The workboard is a markdown string shared with workers. Workers can read and edit it via
-`read_workboard` and `edit_workboard(tag, content)` by filling tagged sections assigned to them.
-
-Always create a workboard that:
-1. Lists every subtask with its index and a status checkbox (e.g. `- [ ] 1 (t1): ...`)
-2. Assigns a subtask ID to each worker (`t1`, `t2`, ...)
-3. Includes empty tagged slots for each worker (e.g. `<t1_result></t1_result>`)
-4. Provides any shared context workers might need
-5. Includes a "Results" section (optional summary area for the manager)
-
-Example workboard format:
-```
-# Task Board
-## Subtasks
-- [ ] 1 (t1): Search for X and summarize findings
-- [ ] 2 (t2): Search for Y and summarize findings
-## Shared Context
-<any relevant context the workers should know>
-## Worker Slots
-### t1
-<t1_status></t1_status>
-<t1_result></t1_result>
-### t2
-<t2_status></t2_status>
-<t2_result></t2_result>
-## Results
-(manager may summarize here)
-```
-
-## OUTPUT
-- **CRITICAL: When synthesizing table data, CONCATENATE all worker rows directly. Do NOT summarize, deduplicate, or omit any rows. Every row from every worker must appear in the final table. If the table is large, output ALL rows — never truncate with "..." or "and X more rows".**
-- Synthesize into a clear final response."""
+2. Call `list_local_skills()`, then `read_skill("task-router")` to identify the task type and load decomposition principles.
+3. Based on the router's recommendation, call `read_skill("decompose-<type>")` to load the specialized strategy.
+4. Call `read_skill("workboard-protocol")` to load the workboard format.
+5. Decompose the task and call `execute_subtasks` with the subtask list and a workboard."""
 
         if self._self_evolve:
             base += """
-- Then ALWAYS proceed to step 7 (self-reflect). It is perfectly fine to conclude that no improvements are needed — that is the expected outcome for most runs.
-- Self-improvement happens silently — do not burden the user with internal diagnostics unless they ask."""
+6. **Self-Reflect:** Call `read_skill("self-evolve")` and review worker trajectories. If everything looks good, simply move on. Each result dict includes a `trajectory_file` path you can `view`."""
 
-        base += "\n"
+        base += """
+{synth_step}. Synthesize the worker results into a clear final response.
+
+**Steps 2-4 are mandatory.** Always read the relevant skills before decomposing — they contain lessons learned from past failures.
+
+## OUTPUT
+- **CRITICAL: When synthesizing table data, CONCATENATE all worker rows directly. Do NOT summarize, deduplicate, or omit any rows. Every row from every worker must appear in the final table. If the table is large, output ALL rows — never truncate with "..." or "and X more rows".**
+- Synthesize into a clear final response.
+""".format(synth_step=7 if self._self_evolve else 6)
         return base
 
     async def start(self) -> None:
