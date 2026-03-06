@@ -406,7 +406,7 @@ class MementoTeams(App):
         self._webpages_last_count: int = -1
         self._orchestrator_start_error: str | None = None
         self._orchestrator_traj_path: Path | None = None
-        self._self_evolve_enabled: bool = True
+        self._self_evolve_enabled: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -429,7 +429,7 @@ class MementoTeams(App):
                             yield Input("10", id="workers_count", type="integer", max_length=3)
                         with Vertical(classes="compact_field"):
                             yield Static("Self-Evolve:", id="evolve_label")
-                            yield Switch(value=True, id="evolve_switch")
+                            yield Switch(value=False, id="evolve_switch")
                     with Vertical(classes="key_field"):
                         yield Static("OpenRouter API Key:", classes="key_label")
                         yield Input(self._openrouter_key, id="openrouter_key_input", password=True, placeholder="sk-or-...", classes="key_input")

@@ -44,12 +44,22 @@ Key events to examine:
 
 Classify the issue into one of these categories:
 
-### Decomposition Failures → fix `decompose-strategy`
+### Routing Failures → fix `task-router`
+- **Wrong type matched:** The router sent the task to the wrong `decompose-<type>` skill, leading to an inappropriate decomposition strategy
+- **No match when one exists:** The task clearly fits an existing type but fell through to the default fallback
+- **Fix:** Add/refine match criteria or key signals in the relevant task type section of `task-router`
+
+### Strategy Failures → fix the specific `decompose-<type>` skill
 - **Missing context:** Worker was confused because the subtask description lacked necessary information (file paths, parameter values, background context)
 - **Task too broad:** Worker took too long or produced unfocused results because the subtask scope was too wide
 - **Task too narrow:** Multiple subtasks could have been one, causing unnecessary overhead
 - **Inter-dependency:** A subtask implicitly depended on another worker's result (violating statelessness)
 - **Bad slicing:** Task elements were split in a way that caused redundant work across workers
+- **Fix:** Read and improve the specific `decompose-<type>` skill that was used for this task
+
+### New Task Type → create a new `decompose-<type>` skill + update `task-router`
+- **Repeated fallback:** The task did not match any existing type, AND the fallback decomposition produced poor results
+- **Fix:** Create a new skill file at `orchestrator/skills/decompose-<new-type>/SKILL.md` using `file_create`, following the format of existing decompose skills. Then add a new section to `task-router` with match criteria and key signals.
 
 ### Coordination Failures → fix `workboard-protocol`
 - **Tag confusion:** Worker edited the wrong workboard tags or could not find its tags
@@ -66,20 +76,29 @@ Classify the issue into one of these categories:
 
 First, read the current skill content:
 ```
-read_skill("decompose-strategy")
-read_skill("workboard-protocol")
+read_skill("<skill-to-fix>")
 ```
 
 Then apply **targeted, incremental** improvements using `str_replace`:
 
 ```
 str_replace(
-  description="Improving decompose-strategy based on trajectory analysis",
-  path="orchestrator/skills/decompose-strategy/SKILL.md",
+  description="Improving <skill-name> based on trajectory analysis",
+  path="orchestrator/skills/<skill-name>/SKILL.md",
   old_str="<exact text to replace>",
   new_str="<improved text>"
 )
 ```
+
+To create a new decompose skill:
+```
+file_create(
+  description="Create new decompose skill for <type>",
+  path="orchestrator/skills/decompose-<type>/SKILL.md",
+  file_text="---\nname: decompose-<type>\ndescription: <one-line description>\n---\n\n<skill content>"
+)
+```
+Then update `task-router` to add a new section referencing it.
 
 ### Improvement Guidelines
 
@@ -105,24 +124,22 @@ str_replace(
 - **NEVER** make changes based on a single transient error (network timeout, API rate limit).
 - **ALWAYS** read the current skill content before editing to ensure `old_str` matches exactly.
 - **ALWAYS** use a sufficiently large `old_str` block to ensure uniqueness in the file.
-- **Limit to 1-2 improvements per self-evolve cycle.** Do not over-correct.
 - If unsure whether a change is warranted, **skip it**.
 
 ## Example Analysis
 
 Worker trajectory shows:
-- Worker was asked to "find details about config"
-- Worker called `bash_tool` with `find / -name config` (too broad, searched entire filesystem)
-- Worker timed out after 120 seconds
+- Task was routed to `decompose-annual-rank-stats` but the query was actually about comparing product specs
+- Workers returned yearly rankings instead of side-by-side specs
 
-**Diagnosis:** Missing context in decomposition. The subtask said "config" without specifying which config file or directory.
+**Diagnosis:** Routing failure. The router matched "rank" in the query but the task was entity-benchmarking.
 
-**Fix for `decompose-strategy`:**
+**Fix for `task-router`:**
 ```
 str_replace(
-  description="Add guidance about specifying file paths in subtask descriptions",
-  path="orchestrator/skills/decompose-strategy/SKILL.md",
-  old_str="- GOOD: \"Read the file /home/user/project/config.py and extract the database URL\"\n- BAD: \"Read the config file mentioned earlier\"",
-  new_str="- GOOD: \"Read the file /home/user/project/config.py and extract the database URL\"\n- BAD: \"Read the config file mentioned earlier\"\n- GOOD: \"Search for Python files in /home/user/project/src/ that import the requests library\"\n- BAD: \"Find files that use requests\""
+  description="Clarify annual-rank-stats vs entity-benchmarking distinction",
+  path="orchestrator/skills/task-router/SKILL.md",
+  old_str="**Key signal:** Query uses \"Year\" or \"Rank\" as the primary unique identifier for the data rows.",
+  new_str="**Key signal:** Query uses \"Year\" or \"Rank\" as the primary unique identifier for the data rows. Note: if the query asks for side-by-side comparison of specific entities (even if rankings are mentioned), prefer `entity-benchmarking` instead."
 )
 ```

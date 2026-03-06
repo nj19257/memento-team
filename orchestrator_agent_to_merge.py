@@ -46,11 +46,9 @@ class OrchestratorAgent:
         args: Sequence[str] | None = None,
         env: Mapping[str, str] | None = None,
         system_message: str | None = None,
-        self_evolve: bool = True,
     ) -> None:
         self.name = name
         self.model = model
-        self._self_evolve = self_evolve
         self._description = description or (
             "Decomposes complex tasks into subtasks and dispatches "
             "them to Memento-S worker agents for parallel execution."
@@ -63,21 +61,16 @@ class OrchestratorAgent:
         self._agent_graph: Any = None
 
     def _build_default_system_message(self) -> str:
-        base = """You are an Orchestrator Agent coordinating a pool of Memento-S workers.
+        return """You are an Orchestrator Agent coordinating a pool of Memento-S workers.
 
 ## YOUR JOB
+
 1. Receive a task from the user.
-2. **Before decomposing, ALWAYS call `list_local_skills()` first, then call `read_skill("task-router")` to identify the task type.**
-3. Based on the router's recommendation, call `read_skill("decompose-<type>")` to load strategy guidance for this type of task.
+2. **Before decomposing, ALWAYS call `list_orchestrator_skills()` first, then call `read_orchestrator_skill("task-router")` to identify the task type.**
+3. Based on the router's recommendation, call `read_orchestrator_skill("decompose-<type>")` to load strategy guidance for this type of task.
 4. Decompose the task using your own judgment, informed by the loaded strategy. The skill provides proven patterns and anti-patterns — use them as guidance, not rigid rules.
-5. Call `execute_subtasks` with the list of subtask strings and a workboard (REQUIRED — see format below).
-6. Synthesize the worker results into a clear final response."""
-
-        if self._self_evolve:
-            base += f"""
-7. **Self-Reflect:** ALWAYS call `read_skill("self-evolve")` after synthesis and review worker trajectories. If everything looks good, simply move on — no changes needed. But if you spot issues, follow the protocol to improve skills. Each result dict includes a `trajectory_file` path you can `view`."""
-
-        base += """
+5. Call `execute_subtasks` with the list of subtask strings.
+6. Synthesize the worker results into a final response.
 
 **Important: Steps 2-3 are mandatory. Always read the relevant skills before decomposing — they contain lessons learned from past failures.**
 
@@ -133,16 +126,12 @@ Example workboard format:
 ```
 
 ## OUTPUT
+- After receiving worker results, call `read_orchestrator_skill("verify")` to load the verification checklist.
+- Verify completeness: check row count, column coverage, and data consistency before producing the final response.
+- If gaps are found, dispatch targeted follow-up subtasks to fill them before finalizing.
 - **CRITICAL: When synthesizing table data, CONCATENATE all worker rows directly. Do NOT summarize, deduplicate, or omit any rows. Every row from every worker must appear in the final table. If the table is large, output ALL rows — never truncate with "..." or "and X more rows".**
-- Synthesize into a clear final response."""
-
-        if self._self_evolve:
-            base += """
-- Then ALWAYS proceed to step 7 (self-reflect). It is perfectly fine to conclude that no improvements are needed — that is the expected outcome for most runs.
-- Self-improvement happens silently — do not burden the user with internal diagnostics unless they ask."""
-
-        base += "\n"
-        return base
+- Synthesize into a clear final response.
+"""
 
     async def start(self) -> None:
         """Initialize MCP connection to worker pool and build the agent graph."""
