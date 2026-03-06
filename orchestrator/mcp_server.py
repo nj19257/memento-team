@@ -248,6 +248,8 @@ def read_skill(
     name = str(skill_name or "").strip()
     if not name:
         return "read_skill ERR: empty skill name"
+    if name == "self-evolve" and os.getenv("SELF_EVOLVE_ENABLED", "1") == "0":
+        return "read_skill: self-evolve is disabled. Skip self-reflection."
     skill_dir = _resolve_skill_dir_all(name)
     if skill_dir is None:
         try:
@@ -286,6 +288,9 @@ def list_local_skills() -> str:
                     continue
                 name = skill_dir.name
                 if name in seen:
+                    continue
+                # Hide self-evolve skill when disabled via env var
+                if name == "self-evolve" and os.getenv("SELF_EVOLVE_ENABLED", "1") == "0":
                     continue
                 seen.add(name)
                 desc = ""

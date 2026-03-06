@@ -46,9 +46,11 @@ class OrchestratorAgent:
         args: Sequence[str] | None = None,
         env: Mapping[str, str] | None = None,
         system_message: str | None = None,
+        self_evolve: bool = True,
     ) -> None:
         self.name = name
         self.model = model
+        self._self_evolve = self_evolve
         self._description = description or (
             "Decomposes complex tasks into subtasks and dispatches "
             "them to Memento-S worker agents for parallel execution."
@@ -61,15 +63,20 @@ class OrchestratorAgent:
         self._agent_graph: Any = None
 
     def _build_default_system_message(self) -> str:
-        return """You are an Orchestrator Agent coordinating a pool of Memento-S workers.
+        base = """You are an Orchestrator Agent coordinating a pool of Memento-S workers.
 
 ## YOUR JOB
 1. Receive a task from the user.
 2. Load your strategies by calling `list_local_skills` to see available skills, then use `read_skill` to load `decompose-strategy` and `workboard-protocol`.
 3. Decompose the task into focused, self-contained subtasks following the decompose-strategy skill.
 4. Call `execute_subtasks` with the list of subtask strings and a workboard following the workboard-protocol skill.
-5. Synthesize the worker results into a clear final response.
-6. **Self-Reflect:** ALWAYS call `read_skill("self-evolve")` after synthesis and review worker trajectories. If everything looks good, simply move on — no changes needed. But if you spot issues, follow the protocol to improve skills. Each result dict includes a `trajectory_file` path you can `view`.
+5. Synthesize the worker results into a clear final response."""
+
+        if self._self_evolve:
+            base += """
+6. **Self-Reflect:** ALWAYS call `read_skill("self-evolve")` after synthesis and review worker trajectories. If everything looks good, simply move on — no changes needed. But if you spot issues, follow the protocol to improve skills. Each result dict includes a `trajectory_file` path you can `view`."""
+
+        base += """
 
 ## AVAILABLE TOOLS
 - `list_local_skills()` — list all available skills
@@ -87,10 +94,15 @@ Before decomposing any task, ALWAYS:
 3. Call `read_skill("workboard-protocol")` to load workboard format
 
 ## OUTPUT
-- After receiving worker results, synthesize into a clear final response.
+- After receiving worker results, synthesize into a clear final response."""
+
+        if self._self_evolve:
+            base += """
 - Then ALWAYS proceed to step 6 (self-reflect). It is perfectly fine to conclude that no improvements are needed — that is the expected outcome for most runs.
-- Self-improvement happens silently — do not burden the user with internal diagnostics unless they ask.
-"""
+- Self-improvement happens silently — do not burden the user with internal diagnostics unless they ask."""
+
+        base += "\n"
+        return base
 
     async def start(self) -> None:
         """Initialize MCP connection to worker pool and build the agent graph."""

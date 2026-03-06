@@ -17,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Input, Select, Static, TextArea
+from textual.widgets import Button, DataTable, Footer, Header, Input, Select, Static, Switch, TextArea
 try:
     from textual.widgets import MarkdownViewer
 except Exception:
@@ -197,7 +197,28 @@ class MementoTeams(App):
 
     #workers_count {
         width: 10;
-        margin-right: 1;
+        margin-right: 2;
+    }
+
+    #evolve_label {
+        width: auto;
+        height: auto;
+        padding: 0;
+        color: #82d2ff;
+    }
+
+    #evolve_switch {
+        width: auto;
+        height: auto;
+    }
+
+    #evolve_switch > .switch--slider {
+        color: #ef6b73;
+        background: #555555;
+    }
+
+    #evolve_switch.-on > .switch--slider {
+        color: #61d47a;
     }
 
     #run_task {
@@ -385,6 +406,7 @@ class MementoTeams(App):
         self._webpages_last_count: int = -1
         self._orchestrator_start_error: str | None = None
         self._orchestrator_traj_path: Path | None = None
+        self._self_evolve_enabled: bool = True
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -405,6 +427,9 @@ class MementoTeams(App):
                         with Vertical(classes="compact_field"):
                             yield Static("Workers:", id="workers_label")
                             yield Input("10", id="workers_count", type="integer", max_length=3)
+                        with Vertical(classes="compact_field"):
+                            yield Static("Self-Evolve:", id="evolve_label")
+                            yield Switch(value=True, id="evolve_switch")
                     with Vertical(classes="key_field"):
                         yield Static("OpenRouter API Key:", classes="key_label")
                         yield Input(self._openrouter_key, id="openrouter_key_input", password=True, placeholder="sk-or-...", classes="key_input")
@@ -532,7 +557,8 @@ class MementoTeams(App):
             child_env.setdefault("FASTMCP_LOG_LEVEL", "ERROR")
             child_env.setdefault("FASTMCP_QUIET", "1")
             child_env["MAX_WORKERS"] = str(self._max_workers)
-            self.orchestrator = OrchestratorAgent(model=model, env=child_env)
+            child_env["SELF_EVOLVE_ENABLED"] = "1" if self._self_evolve_enabled else "0"
+            self.orchestrator = OrchestratorAgent(model=model, env=child_env, self_evolve=self._self_evolve_enabled)
             await self.orchestrator.start()
             self._orchestrator_start_error = None
         except Exception as exc:
@@ -645,6 +671,12 @@ class MementoTeams(App):
             if event.value == Select.BLANK:
                 return
             self._on_example_selected(int(event.value))
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "evolve_switch":
+            self._self_evolve_enabled = event.value
+            if not self._task_running:
+                asyncio.create_task(self._start_orchestrator())
 
     def on_input_changed(self, event) -> None:  # Textual Input.Changed
         widget_id = getattr(getattr(event, "input", None), "id", None)
