@@ -22,6 +22,17 @@ dependencies = [
     "pyyaml",
     "google_search_results",
     "requests",
+    "pydantic",
+    "pydantic-settings",
+    "sentence-transformers",
+    "chromadb",
+    "rank-bm25",
+    "anthropic",
+    "openai",
+    "nltk",
+    "jieba>=0.42.1",
+    "crawl4ai",
+    "watchdog",
 ]
 
 [build-system]

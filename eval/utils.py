@@ -122,8 +122,8 @@ def load_tasks(task_ids: list[str] | None = None) -> list[dict]:
 
 
 def default_task_ids() -> list[str]:
-    """Return ws_en_001 through ws_en_020."""
-    return [f"ws_en_{i:03d}" for i in range(1, 21)]
+    """Return ws_en_001 through ws_en_020 and ws_en_080 through ws_en_100."""
+    return [f"ws_en_{i:03d}" for i in range(1, 21)] + [f"ws_en_{i:03d}" for i in range(80, 101)]
 
 
 # ---------------------------------------------------------------------------

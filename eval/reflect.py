@@ -66,33 +66,47 @@ def cluster_tasks(report: dict) -> list[dict]:
             "missing_rows": f"{missing_count}/{total_gold}",
         })
 
-    prompt = f"""You are an AI systems engineer. Analyze these 20 information-seeking tasks and cluster them into 3-5 task types based on their query structure, required data schema, and error patterns.
+    prompt = f"""You are an AI systems engineer. Analyze these information-seeking tasks and cluster them by HOW they should be decomposed (the splitting strategy), NOT by their topic/domain.
 
 ## Tasks
 {json.dumps(task_summaries, indent=2, ensure_ascii=False)}
 
 ## Instructions
-Group these tasks into 3-5 clusters. For each cluster, provide:
-1. A kebab-case type_name (e.g., "product-catalog", "timeline-events")
-2. A description of what makes this type distinct
+Cluster these tasks into 3-5 groups based on the DECOMPOSITION PATTERN — how work should be split across parallel workers. The same pattern can apply to completely different topics.
+
+Think about these dimensions:
+- **Primary split axis**: by time period? by entity/brand? by geographic region? by category/rank segment?
+- **Data density**: many rows per partition vs few rows with deep research per row?
+- **Schema complexity**: wide tables with many technical columns vs narrow tables with text-heavy columns?
+
+Example decomposition patterns (use these or derive your own):
+- "split-by-time-period": Tasks where the natural partition is chronological (e.g., events per year, monthly data)
+- "split-by-entity": Tasks where each entity/brand/organization is independent and gets its own worker
+- "split-by-rank-segment": Tasks with ordered lists that should be divided into rank ranges (Top 1-10, 11-20, etc.)
+- "split-by-region": Tasks where geographic or administrative boundaries define the partitions
+
+For each cluster, provide:
+1. A kebab-case type_name describing the DECOMPOSITION PATTERN (not the topic)
+2. A description of WHEN and WHY to use this splitting strategy
 3. The list of instance_ids that belong to this cluster
-4. The recommended decomposition_pattern (how to split work across workers)
+4. The decomposition_pattern details
 
 Return ONLY valid JSON array, no markdown code fences:
 [
   {{
-    "type_name": "example-type",
-    "description": "...",
+    "type_name": "split-by-time-period",
+    "description": "Use when data spans a timeline and each time segment is independent...",
     "instance_ids": ["ws_en_001", ...],
-    "decomposition_pattern": "..."
+    "decomposition_pattern": "Assign one worker per time block (year, quarter, decade)..."
   }},
   ...
 ]
 
 Requirements:
 - Every task must appear in exactly one cluster
+- type_name must describe the SPLITTING STRATEGY, not the topic
+- Two tasks about completely different topics CAN be in the same cluster if they need the same splitting approach
 - type_name must be kebab-case, max 25 chars
-- Focus on structural similarity (schema shape, data volume, temporal vs categorical)
 """
 
     raw = call_gemini_flash(prompt)

@@ -542,11 +542,17 @@ class MementoTeams(App):
             self._orchestrator_start_error = None
         except Exception as exc:
             self.orchestrator = None
-            self._orchestrator_start_error = (
+            err_detail = (
                 "Failed to start orchestrator.\n\n"
                 f"{type(exc).__name__}: {exc}\n\n"
                 f"{traceback.format_exc()}"
             )
+            self._orchestrator_start_error = err_detail
+            # Write error to file for debugging
+            try:
+                (ROOT / "logs" / "orchestrator_start_error.log").write_text(err_detail, encoding="utf-8")
+            except Exception:
+                pass
 
     def _save_env_key(self, key_name: str, key_value: str) -> None:
         """Persist a key=value to the .env file."""
