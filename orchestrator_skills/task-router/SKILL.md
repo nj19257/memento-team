@@ -4,34 +4,34 @@ description: Identifies the task type and directs the orchestrator to the correc
 ---
 
 ## How to Use
-1. Read the user's query
-2. Match it against the task types below
-3. Call `read_orchestrator_skill("decompose-<matched_type>")` to load the specialized strategy
+1. Read the user's query and identify the primary organizational axis (time, entity, category, or rank).
+2. Match it against the task types below.
+3. Call `read_orchestrator_skill("decompose-<matched_type>")` to load the specialized strategy.
 
 ## Task Types
 
-### annual-rank-stats
-**Match when:** The query asks for periodic statistical reports, official rankings, or award lists organized by year or rank (e.g., "Top 100 companies 2010-2020" or "Annual GDP growth by country").
-**Load skill:** `decompose-annual-rank-stats`
-**Key signal:** Query uses "Year" or "Rank" as the primary unique identifier for the data rows.
+### split-by-rank-segment
+**Match when:** The query asks for a specific "Top N" list or a numbered ranking (e.g., "Top 50 movies," "100 best-selling albums"). The request relies on a pre-existing ordinal sequence.
+**Load skill:** `decompose-split-by-rank-segment`
+**Key signal:** Presence of ordinal numbers, "Top [X]," or "Ranked" phrasing.
 
-### temporal-event-logs
-**Match when:** The request involves tracking specific occurrences, performances, or appearances over a timeline. Usually involves high row counts and precise dates.
-**Load skill:** `decompose-temporal-event-logs`
-**Key signal:** Query mentions "tours," "match results," "concerts," or "chronological history" of a specific subject.
+### split-by-time-period
+**Match when:** The query specifies a continuous chronological range or a multi-year history (e.g., "from 2010 to 2024," "all releases in the 1990s").
+**Load skill:** `decompose-split-by-time-period`
+**Key signal:** Date ranges, decades, or "year-by-year" requirements.
 
-### geographic-registries
-**Match when:** The task requires listing protected sites, parks, or corporate entities within specific administrative or geographic boundaries.
-**Load skill:** `decompose-geographic-registries`
-**Key signal:** Query mentions "National Parks," "UNESCO sites," "registered companies in [Region]," or "official registry."
+### split-by-entity
+**Match when:** The query lists specific, discrete subjects like brand names, individual people, or specific product models that require deep attribute extraction (e.g., "Nikon Z6, Sony A7IV, and Canon R6").
+**Load skill:** `decompose-split-by-entity`
+**Key signal:** Proper nouns of specific products, companies, or individuals.
 
-### entity-benchmarking
-**Match when:** The query requires comparing multiple organizations, products, or institutions based on technical specs, metrics, or attributes.
-**Load skill:** `decompose-entity-benchmarking`
-**Key signal:** Query mentions multiple specific brands, universities, or vehicle models for side-by-side comparison.
+### split-by-category
+**Match when:** The query is organized by broad domain classifications, geographic regions, or institutional departments (e.g., "by country," "academic subjects," or "sports leagues").
+**Load skill:** `decompose-split-by-category`
+**Key signal:** Use of "by [Category Name]" or lists of distinct sectors/regions.
 
 ## Default Fallback
 If no type matches clearly, use general decomposition principles:
-- Split by entity or category
-- Keep each worker under 30 rows
-- List all required columns in every subtask
+- Split by entity or category to ensure data independence.
+- Keep each worker load under 30 rows to prevent context loss.
+- Explicitly list all required columns/attributes in every subtask description.

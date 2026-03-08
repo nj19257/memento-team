@@ -81,6 +81,14 @@ class OrchestratorAgent:
 - Keep subtasks atomic and bounded
 - If the task has many parts, split into bounded slices
 
+## CONSTRAINT PROPAGATION — CRITICAL
+When decomposing, you MUST copy ALL constraints from the original query into EVERY subtask:
+- Inclusion/exclusion filters (any "excluding X", "only Y" clauses from the query)
+- Exact column definitions and the value format the user specified (full names, units, conventions)
+- Specific terminology or notation requirements stated in the query
+- Negative constraints and scope boundaries
+For each subtask, include a "Format Example" — one sample row showing the exact columns and value conventions so workers produce consistent, mergeable output.
+
 ## CRITICAL: Workers are STATELESS
 - Write SELF-CONTAINED descriptions with full details
 - Never write "find details for the above" — workers have no context
@@ -126,7 +134,6 @@ Example workboard format:
 ```
 
 ## OUTPUT
-- After receiving worker results, call `read_orchestrator_skill("verify")` to load the verification checklist.
 - Verify completeness: check row count, column coverage, and data consistency before producing the final response.
 - If gaps are found, dispatch targeted follow-up subtasks to fill them before finalizing.
 - **CRITICAL: When synthesizing table data, CONCATENATE all worker rows directly. Do NOT summarize, deduplicate, or omit any rows. Every row from every worker must appear in the final table. If the table is large, output ALL rows — never truncate with "..." or "and X more rows".**

@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 
 def _env_truthy(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -21,6 +25,11 @@ if QUIET_STDERR:
     # Suppress third-party startup banners/logs that can corrupt TUI rendering.
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+# Bridge OPENROUTER env vars to new Memento-S LLM_* vars
+if os.getenv("OPENROUTER_API_KEY") and not os.getenv("LLM_API"):
+    os.environ["LLM_API"] = "openrouter"
+    os.environ["LLM_MODEL"] = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5")
+
 # Set up imports from Memento-S directory
 _MEMENTO_S_DIR = str(Path(__file__).resolve().parent.parent / "Memento-S")
 sys.path.insert(0, _MEMENTO_S_DIR)
@@ -28,8 +37,9 @@ os.chdir(_MEMENTO_S_DIR)
 
 from fastmcp import FastMCP
 
-from core.mcp_agent import MCPAgent
-from core.model_factory import build_chat_model
+from core.agent.memento_s_agent import MementoSAgent
+from core.agent.session_manager import generate_session_id
+from core.tools.builtins import configure_workboard
 
 import logging
 
@@ -189,31 +199,50 @@ def list_orchestrator_skills() -> str:
     return "\n".join(lines) if lines else "(no orchestrator skills found)"
 
 
-def _extract_agent_output(result: dict[str, Any] | Any) -> str:
-    """Best-effort extraction of final assistant text from MCPAgent.run()."""
-    if isinstance(result, dict):
-        messages = result.get("messages")
-        if isinstance(messages, (list, tuple)) and messages:
-            last = messages[-1]
-            content = getattr(last, "content", None)
-            if isinstance(content, str) and content.strip():
-                return content
-            if isinstance(content, list):
-                # LangChain may return structured content blocks.
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif isinstance(item, dict) and item.get("text"):
-                        parts.append(str(item.get("text")))
-                    else:
-                        parts.append(str(item))
-                text = "\n".join(p for p in parts if p).strip()
-                if text:
-                    return text
-        if isinstance(result.get("output"), str) and result.get("output").strip():
-            return str(result["output"])
-    return str(result)
+def _extract_tool_call_events(
+    session_manager: Any,
+    session_id: str,
+    worker_index: int,
+    subtask_id: str,
+) -> list[dict[str, Any]]:
+    """Extract tool_call_end events from session messages for trajectory/webpages."""
+    events: list[dict[str, Any]] = []
+    try:
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return events
+        messages = session.get("messages", [])
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                continue
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                tc_id = tc.get("id", "")
+                tool_name = func.get("name", "")
+                args_str = func.get("arguments", "")
+                if isinstance(args_str, dict):
+                    args_str = json.dumps(args_str, ensure_ascii=False)
+                # Find the matching tool result message
+                result_preview = ""
+                for rmsg in messages:
+                    if rmsg.get("role") == "tool" and rmsg.get("tool_call_id") == tc_id:
+                        result_preview = str(rmsg.get("content", ""))[:500]
+                        break
+                events.append(_trajectory_event(
+                    "tool_call_end",
+                    worker_index=worker_index,
+                    subtask_id=subtask_id,
+                    tool_name=tool_name,
+                    args_preview=args_str[:500],
+                    result_preview=result_preview,
+                ))
+    except Exception:
+        pass
+    return events
+
 
 EXECUTE_SUBTASKS_DESCRIPTION = f"""
 Execute 1-{MAX_POOL_SIZE} independent subtasks in parallel using Memento-S agent workers.
@@ -244,32 +273,6 @@ Args:
 """
 
 
-async def _execute_single_subtask(subtask: str, subtask_id: str | None = None) -> str:
-    """Run a single subtask using the new Memento-S MCPAgent."""
-    execution_text = subtask
-    board_content = _workboard_read()
-    sid = str(subtask_id or "").strip()
-    tag_prefix = f"{sid}_" if sid else ""
-    if board_content and board_content != "(no workboard exists)":
-        execution_text = (
-            f"{subtask}\n\n"
-            "## Workboard Coordination\n"
-            "A shared workboard exists. Use `read_workboard` and `edit_workboard` "
-            "to read and fill your assigned tagged sections.\n"
-            + (f"Your subtask ID is `{sid}`. Only edit tags starting with `{tag_prefix}`.\n" if sid else "")
-            + "Read the board first, then write concise updates into your tags.\n\n"
-            f"```markdown\n{board_content}\n```"
-        )
-
-    agent = MCPAgent(model=build_chat_model(), base_dir=WORKSPACE_DIR)
-    await agent.start()
-    try:
-        result = await agent.run(execution_text)
-        return _extract_agent_output(result).strip()
-    finally:
-        await agent.close()
-
-
 def _trajectory_event(event: str, **fields: Any) -> dict[str, Any]:
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -296,18 +299,7 @@ def _append_live_trajectory_event(path: Path, event: dict) -> None:
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception:
-        # Best-effort only; final save still writes full trajectory.
         pass
-
-
-def _execute_single_subtask_with_trajectory(
-    subtask: str,
-    idx: int,
-    live_path: Path | None = None,
-) -> tuple[str, list[dict]]:
-    """Legacy compatibility wrapper (trajectory hooks removed in new Memento-S)."""
-    _ = (subtask, idx, live_path)
-    return "", []
 
 
 def _create_live_trajectory(idx: int, subtask: str) -> Path | None:
@@ -393,44 +385,20 @@ def _print_trajectory(idx: int, events: list[dict]) -> None:
             _stderr_print(f"  [{ts}] TRY    attempt={e.get('attempt')}  subtask_id={e.get('subtask_id')}")
         elif event == "worker_prompt_built":
             _stderr_print(f"  [{ts}] PROMPT subtask_id={e.get('subtask_id')}")
-        elif event == "agent_tools_loaded":
-            _stderr_print(f"  [{ts}] TOOLS  count={e.get('tool_count')} names={_short(str(e.get('tool_names', [])), 80)}")
-        elif event == "agent_run_start":
-            _stderr_print(f"  [{ts}] AGENT  run_start messages={e.get('message_count')}")
-        elif event == "tool_call_start":
-            _stderr_print(f"  [{ts}] TOOL   {e.get('tool_name')} start")
+        elif event == "worker_agent_invoke_start":
+            _stderr_print(f"  [{ts}] AGENT  invoke_start subtask_id={e.get('subtask_id')}")
         elif event == "tool_call_end":
-            _stderr_print(
-                f"  [{ts}] TOOL   {e.get('tool_name')} ok {e.get('duration_ms')}ms result={_short(str(e.get('result_preview', '')), 80)}"
-            )
-        elif event == "tool_call_error":
-            _stderr_print(
-                f"  [{ts}] TOOL   {e.get('tool_name')} ERR {e.get('duration_ms')}ms { _short(str(e.get('error','')), 80)}"
-            )
+            _stderr_print(f"  [{ts}] TOOL   {e.get('tool_name')} result={_short(str(e.get('result_preview', '')), 80)}")
+        elif event == "worker_agent_invoke_end":
+            _stderr_print(f"  [{ts}] AGENT  invoke_end result={_short(str(e.get('result_preview', '')), 80)}")
+        elif event == "worker_end":
+            _stderr_print(f"  [{ts}] END    status={e.get('status')} sec={e.get('duration_seconds')}")
         elif event == "workboard_snapshot_read":
             _stderr_print(f"  [{ts}] BOARD  snapshot bytes={e.get('bytes')}")
         elif event == "workboard_checkbox_update":
             _stderr_print(f"  [{ts}] BOARD  checkbox item={e.get('item')} checked")
         elif event == "workboard_result_append":
             _stderr_print(f"  [{ts}] BOARD  result_append item={e.get('item')}")
-        elif event == "worker_agent_invoke_end":
-            _stderr_print(f"  [{ts}] AGENT  run_end result={_short(str(e.get('result_preview','')), 80)}")
-        elif event == "worker_end":
-            _stderr_print(f"  [{ts}] END    status={e.get('status')} sec={e.get('duration_seconds')}")
-        elif event == "run_one_skill_loop_start":
-            _stderr_print(f"  [{ts}] START  skill={e.get('skill_name')}  task={_short(e.get('user_text', ''))}")
-        elif event == "run_one_skill_loop_round_plan":
-            plan = e.get("plan", {})
-            ops = plan.get("ops", []) if isinstance(plan, dict) else []
-            op_types = [str(o.get("type", "?")) for o in ops if isinstance(o, dict)]
-            _stderr_print(f"  [{ts}] PLAN   round={e.get('round')}  ops={op_types}")
-        elif event == "execute_skill_plan_output":
-            result = str(e.get("result", ""))[:120]
-            _stderr_print(f"  [{ts}] EXEC   skill={e.get('skill_name')}  result={result}")
-        elif event == "run_one_skill_loop_continue":
-            _stderr_print(f"  [{ts}] CONTINUE  round={e.get('round')}")
-        elif event == "run_one_skill_loop_end":
-            _stderr_print(f"  [{ts}] END    round={e.get('round')}  mode={e.get('mode')}")
     _stderr_print(f"{'─' * 60}\n")
 
 
@@ -446,6 +414,16 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
         for i, st in enumerate(subtasks):
             _stderr_print(f"  Subtask {i + 1}: {st}")
         _stderr_print("")
+
+        # Reset fetch guard state so workers start fresh (prevents cross-run rate-limit carryover)
+        guard_state_file = WORKSPACE_DIR / "skills" / "web-search" / ".agent" / "web_fetch_guard_state.json"
+        if guard_state_file.exists():
+            guard_state_file.unlink()
+            _stderr_print("  [FetchGuard] Cleared web_fetch_guard_state.json for fresh run")
+
+        # Raise per-host fetch limits so parallel workers don't exhaust quotas
+        os.environ.setdefault("WEB_FETCH_MAX_PER_HOST", "50")
+        os.environ.setdefault("WEB_FETCH_MAX_REPEAT_PER_URL", "10")
 
         if not subtasks or len(subtasks) < 1:
             raise ValueError("Must provide at least 1 subtask")
@@ -480,19 +458,11 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         worker_input = f"[Subtask ID: {subtask_id}]\n{subtask}"
                         record("worker_attempt_start", attempt=attempt + 1, subtask_id=subtask_id)
 
-                        def sink(ev: dict[str, Any]) -> None:
-                            payload = dict(ev)
-                            payload.setdefault("worker_index", idx)
-                            payload.setdefault("subtask_id", subtask_id)
-                            trajectory.append(payload)
-                            if live_traj_path is not None:
-                                _append_live_trajectory_event(live_traj_path, payload)
-
-                        # Rebuild prompt here so we can emit wrapper events and use MCPAgent sink.
+                        # Build execution prompt with workboard context
                         execution_text = worker_input
                         board_content = _workboard_read()
                         if board_content and board_content != "(no workboard exists)":
-                            sink(_trajectory_event("workboard_snapshot_read", bytes=len(board_content.encode("utf-8"))))
+                            record("workboard_snapshot_read", bytes=len(board_content.encode("utf-8")))
                             tag_prefix = f"{subtask_id}_"
                             execution_text = (
                                 f"{worker_input}\n\n"
@@ -501,18 +471,40 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                                 "to read and fill your assigned tagged sections.\n"
                                 f"Your subtask ID is `{subtask_id}`. Only edit tags starting with `{tag_prefix}`.\n"
                                 "Read the board first, then write concise updates into your tags.\n\n"
+                                "## Search Strategy Guidance\n"
+                                "- Search for ALL variants and sub-categories, not just the most common ones\n"
+                                "- Use multiple sources — if one source is rate-limited, switch to alternatives immediately\n"
+                                "- Cross-reference at least 2 independent sources for completeness\n"
+                                "- Aim for EXHAUSTIVE coverage — missing an entry is worse than having extra rows\n\n"
+                                "## Time Budget — IMPORTANT\n"
+                                "You have a budget of ~3 minutes. Prioritize:\n"
+                                "1. Get a COMPLETE list from a summary/index page first\n"
+                                "2. Only fetch detail pages if essential data is missing from the summary\n"
+                                "3. If you have spent many tool calls and still have gaps, OUTPUT WHAT YOU HAVE rather than continuing to search\n"
+                                "4. Never fetch the same host more than 20 times — switch sources or stop\n\n"
                                 f"```markdown\n{board_content}\n```"
                             )
-                        sink(_trajectory_event("worker_prompt_built", subtask_id=subtask_id, prompt_preview=execution_text[:500]))
-                        agent = MCPAgent(model=build_chat_model(), base_dir=WORKSPACE_DIR, event_sink=sink)
-                        await agent.start()
-                        try:
-                            sink(_trajectory_event("worker_agent_invoke_start", subtask_id=subtask_id))
-                            agent_result = await agent.run(execution_text)
-                            result = _extract_agent_output(agent_result).strip()
-                            sink(_trajectory_event("worker_agent_invoke_end", subtask_id=subtask_id, result_preview=result[:500]))
-                        finally:
-                            await agent.close()
+                        record("worker_prompt_built", subtask_id=subtask_id, prompt_preview=execution_text[:500])
+
+                        # Create a new MementoSAgent and run
+                        agent = MementoSAgent(workspace=WORKSPACE_DIR)
+                        configure_workboard(WORKBOARD_PATH)
+                        session_id = generate_session_id()
+
+                        record("worker_agent_invoke_start", subtask_id=subtask_id)
+                        result = await agent.reply(session_id, execution_text)
+                        result = result.strip()
+                        record("worker_agent_invoke_end", subtask_id=subtask_id, result_preview=result[:500])
+
+                        # Extract tool_call events from session for trajectory/webpages
+                        tc_events = _extract_tool_call_events(
+                            agent.session_manager, session_id, idx, subtask_id,
+                        )
+                        for ev in tc_events:
+                            trajectory.append(ev)
+                            if live_traj_path is not None:
+                                _append_live_trajectory_event(live_traj_path, ev)
+
                     elapsed = round(time.perf_counter() - start_time, 2)
                     logger.info(
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"

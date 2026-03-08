@@ -1,1260 +1,503 @@
-"""Memento-S CLI — multi-turn conversation powered by MCPAgent."""
 
-from __future__ import annotations
-
-import argparse
 import asyncio
 import json
+import logging
 import os
-import shlex
-import shutil
+import re
 import sys
-import textwrap
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-from uuid import uuid4
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+import typer
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
+from core.agent import MementoSAgent
+from core.agent.session_manager import generate_session_id
+from core.config import g_settings
+from core.config.logging import setup_logging
+from cli.config import config_app
 
 try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import Completer, Completion
-    from prompt_toolkit.key_binding import KeyBindings
-
-    PROMPT_TOOLKIT_AVAILABLE = True
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("memento-s")
 except Exception:
-    PromptSession = None  # type: ignore[assignment]
-    Completer = object  # type: ignore[assignment]
-    Completion = None  # type: ignore[assignment]
-    KeyBindings = None  # type: ignore[assignment]
-    PROMPT_TOOLKIT_AVAILABLE = False
+    __version__ = "0.1.0"
 
-from core.config import DEBUG, PROJECT_ROOT, WORKSPACE_DIR, refresh_runtime_config
+app = typer.Typer(name="MementoS", help="Memento-S Agent CLI", no_args_is_help=True)
+app.add_typer(config_app, name="config", help="Manage configuration and .env file.")
+console = Console()
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
-HELP_COMMANDS = {"help", "/help"}
-CLEAR_COMMANDS = {"clear", "/clear"}
-STATUS_COMMANDS = {"status", "/status"}
-SKILLS_COMMANDS = {"skills", "/skills"}
-HISTORY_COMMANDS = {"history", "/history"}
-CONFIG_COMMANDS = {"config", "/config"}
-
-DEFAULT_HISTORY_FILE = Path(".agent/cli_history.json")
-DEFAULT_ENV_FILE = (PROJECT_ROOT / ".env").resolve()
-SESSION_MESSAGE_LIMIT = 200
-INTERNAL_TURN_LIMIT = 200
-SESSION_STORE_LIMIT = 200
-ANSI_CYAN = "\033[0;36m"
-ANSI_RESET = "\033[0m"
-
-MODEL_RELATED_KEYS = {
-    "OPENROUTER_MODEL",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_BASE_URL",
-    "OPENROUTER_MAX_TOKENS",
-    "OPENROUTER_TIMEOUT",
-}
-
-CONFIG_KEY_ALIASES: dict[str, str] = {
-    "api": "LLM_API",
-    "model": "OPENROUTER_MODEL",
-    "key": "OPENROUTER_API_KEY",
-    "base_url": "OPENROUTER_BASE_URL",
-    "timeout": "OPENROUTER_TIMEOUT",
-    "max_tokens": "OPENROUTER_MAX_TOKENS",
-    "retries": "OPENROUTER_RETRIES",
-    "provider": "OPENROUTER_PROVIDER",
-    "provider_order": "OPENROUTER_PROVIDER_ORDER",
-    "allow_fallbacks": "OPENROUTER_ALLOW_FALLBACKS",
-    "site_url": "OPENROUTER_SITE_URL",
-    "app_name": "OPENROUTER_APP_NAME",
-    "serpapi": "SERPAPI_API_KEY",
-}
-CONFIG_KEYS: tuple[str, ...] = (
-    "LLM_API",
-    "OPENROUTER_MODEL",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_BASE_URL",
-    "OPENROUTER_TIMEOUT",
-    "OPENROUTER_MAX_TOKENS",
-    "OPENROUTER_RETRIES",
-    "OPENROUTER_RETRY_BACKOFF",
-    "OPENROUTER_PROVIDER",
-    "OPENROUTER_PROVIDER_ORDER",
-    "OPENROUTER_ALLOW_FALLBACKS",
-    "OPENROUTER_SITE_URL",
-    "OPENROUTER_APP_NAME",
-    "SERPAPI_API_KEY",
-)
-CONFIG_KEYS_SET = set(CONFIG_KEYS)
-CONFIG_SECRET_KEYS = {"OPENROUTER_API_KEY", "SERPAPI_API_KEY", "OPENAI_API_KEY"}
-CONFIG_ATTR_OVERRIDES = {"OPENROUTER_MODEL": "MODEL"}
-
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "Show this help"),
-    ("/status", "Show session status"),
-    ("/skills [query] [-n N]", "Search cloud skills or list local skills"),
-    ("/config [show|get|set|unset]", "View/update .env config (api/model/etc.)"),
-    ("/history [N]", "Show session history window"),
-    ("/history load <index>", "Load one saved session into current context"),
-    ("/clear", "Clear conversation context/history"),
-    ("/exit", "Exit the CLI"),
+# ── Slash commands ──────────────────────────────────────────────────
+SLASH_COMMANDS = [
+    ("/help",    "Show available commands"),
+    ("/status",  "Show current session status"),
+    ("/config",  "View/update configuration"),
+    ("/history", "List saved sessions or load one"),
+    ("/clear",   "Clear context & start new session"),
+    ("/exit",    "Exit the CLI"),
 ]
-KNOWN_SLASH_COMMANDS = {cmd.split()[0].strip() for cmd, _ in SLASH_COMMANDS if cmd.split()}
-
-
-# ---------------------------------------------------------------------------
-# TurnInterrupted
-# ---------------------------------------------------------------------------
-
-class TurnInterrupted(Exception):
-    """Raised when a running turn is interrupted, with optional partial output."""
-
-    def __init__(self, partial_reply: str = "") -> None:
-        super().__init__("turn interrupted")
-        self.partial_reply = str(partial_reply or "")
-
-
-# ---------------------------------------------------------------------------
-# Prompt toolkit helpers
-# ---------------------------------------------------------------------------
-
-class SlashCommandCompleter(Completer):
-    """Autocomplete slash commands while typing."""
-
-    def get_completions(self, document, complete_event):  # type: ignore[override]
-        text = str(document.text_before_cursor or "")
-        stripped = text.lstrip()
-        if not stripped.startswith("/"):
-            return
-        token = stripped.split(maxsplit=1)[0]
-        seen: set[str] = set()
-        for cmd, desc in SLASH_COMMANDS:
-            base = cmd.split()[0].strip()
-            if not base or base in seen:
-                continue
-            if token == "/" or base.startswith(token):
-                seen.add(base)
-                yield Completion(
-                    base,
-                    start_position=-len(token),
-                    display=base,
-                    display_meta=desc,
-                )
-
-
-def _build_prompt_session():
-    if not PROMPT_TOOLKIT_AVAILABLE:
-        return None
-    try:
-        kb = KeyBindings()
-
-        @kb.add("/")
-        def _slash_autocomplete(event):
-            buf = event.app.current_buffer
-            buf.insert_text("/")
-            try:
-                text = str(buf.document.text_before_cursor or "")
-                token = text.lstrip().split(maxsplit=1)[0] if text.lstrip() else ""
-                if token == "/":
-                    buf.start_completion(select_first=False)
-            except Exception:
-                return
-
-        return PromptSession(
-            completer=SlashCommandCompleter(),
-            complete_while_typing=True,
-            reserve_space_for_menu=10,
-            key_bindings=kb,
-        )
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Small utilities
-# ---------------------------------------------------------------------------
-
-def _split_shell_tokens(text: str) -> list[str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return []
-    try:
-        return shlex.split(raw)
-    except Exception:
-        return raw.split()
-
-
-def _sanitize_history_items(raw: Any) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    if not isinstance(raw, list):
-        return out
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip()
-        content = str(item.get("content") or "").strip()
-        if role in {"user", "assistant"} and content:
-            out.append({"role": role, "content": content})
-    return out
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _build_session_title(first_query: str, *, max_len: int = 80) -> str:
-    one_line = " ".join(str(first_query or "").split())
-    if not one_line:
-        return "Untitled Session"
-    if len(one_line) <= max_len:
-        return one_line
-    return one_line[: max_len - 3].rstrip() + "..."
-
-
-def _new_session() -> dict[str, Any]:
-    return {
-        "id": f"session-{uuid4().hex[:12]}",
-        "title": "",
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-        "messages": [],
-        "internal_turns": [],
-    }
-
-
-def _sanitize_session(raw: Any) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-        return None
-    session_id = str(raw.get("id") or "").strip() or f"session-{uuid4().hex[:12]}"
-    title = str(raw.get("title") or "").strip()
-    created_at = str(raw.get("created_at") or "").strip() or _now_iso()
-    updated_at = str(raw.get("updated_at") or "").strip() or created_at
-    messages = _sanitize_history_items(raw.get("messages"))
-    internal_turns_raw = raw.get("internal_turns")
-    internal_turns: list[dict[str, Any]] = []
-    if isinstance(internal_turns_raw, list):
-        for item in internal_turns_raw:
-            if not isinstance(item, dict):
-                continue
-            user_text = str(item.get("user") or "").strip()
-            assistant_text = str(item.get("assistant") or "").strip()
-            if not user_text and not assistant_text:
-                continue
-            internal_turns.append(
-                {
-                    "ts": str(item.get("ts") or "").strip() or _now_iso(),
-                    "user": user_text,
-                    "assistant": assistant_text,
-                    "interrupted": bool(item.get("interrupted")),
-                }
-            )
-
-    return {
-        "id": session_id,
-        "title": title,
-        "created_at": created_at,
-        "updated_at": updated_at,
-        "messages": messages[-SESSION_MESSAGE_LIMIT:],
-        "internal_turns": internal_turns[-INTERNAL_TURN_LIMIT:],
-    }
-
-
-# ---------------------------------------------------------------------------
-# History store persistence
-# ---------------------------------------------------------------------------
-
-def _load_history_store(path: Path) -> dict[str, Any]:
-    try:
-        if not path.exists():
-            return {"sessions": []}
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, list):
-            legacy_messages = _sanitize_history_items(raw)[-SESSION_MESSAGE_LIMIT:]
-            if not legacy_messages:
-                return {"sessions": []}
-            first_user = next(
-                (m.get("content", "") for m in legacy_messages if m.get("role") == "user"),
-                "",
-            )
-            legacy_session = {
-                "id": "legacy-flat-history",
-                "title": _build_session_title(first_user) if first_user else "Legacy Session",
-                "created_at": _now_iso(),
-                "updated_at": _now_iso(),
-                "messages": legacy_messages,
-                "internal_turns": [],
-            }
-            return {"sessions": [legacy_session]}
-
-        sessions_out: list[dict[str, Any]] = []
-        if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
-            for item in raw["sessions"]:
-                session = _sanitize_session(item)
-                if session is not None:
-                    sessions_out.append(session)
-        return {"sessions": sessions_out[-SESSION_STORE_LIMIT:]}
-    except Exception:
-        return {"sessions": []}
-
-
-def _save_history_store(path: Path, store: dict[str, Any]) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(store, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        return
-
-
-def _upsert_session(store: dict[str, Any], session: dict[str, Any]) -> None:
-    sessions_raw = store.get("sessions")
-    sessions = list(sessions_raw) if isinstance(sessions_raw, list) else []
-    sid = str(session.get("id") or "").strip()
-    replaced = False
-    for idx, item in enumerate(sessions):
-        if isinstance(item, dict) and str(item.get("id") or "").strip() == sid:
-            sessions[idx] = session
-            replaced = True
-            break
-    if not replaced:
-        sessions.append(session)
-    store["sessions"] = sessions[-SESSION_STORE_LIMIT:]
-
-
-# ---------------------------------------------------------------------------
-# .env config helpers
-# ---------------------------------------------------------------------------
-
-def _parse_env_assignment_line(line: str) -> tuple[str, str] | None:
-    text = str(line or "")
-    stripped = text.strip()
-    if not stripped or stripped.startswith("#"):
-        return None
-    if stripped.startswith("export "):
-        stripped = stripped[7:].strip()
-    if "=" not in stripped:
-        return None
-    key, value = stripped.split("=", 1)
-    key = key.strip()
-    if not key:
-        return None
-    return key, value.strip()
-
-
-def _strip_env_quotes(value: str) -> str:
-    s = str(value or "").strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in {"'", '"'}:
-        return s[1:-1]
-    return s
-
-
-def _read_env_map(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        if not path.exists():
-            return out
-        for line in path.read_text(encoding="utf-8").splitlines():
-            parsed = _parse_env_assignment_line(line)
-            if not parsed:
-                continue
-            key, value = parsed
-            out[key] = _strip_env_quotes(value)
-    except Exception:
-        return {}
-    return out
-
-
-def _format_env_value(value: str) -> str:
-    text = str(value or "")
-    if not text:
-        return ""
-    if any(ch.isspace() for ch in text) or "#" in text:
-        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return text
-
-
-def _upsert_env_key(path: Path, key: str, value: str) -> None:
-    lines: list[str] = []
-    try:
-        if path.exists():
-            lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        lines = []
-
-    rendered = f"{key}={_format_env_value(value)}"
-    out: list[str] = []
-    replaced = False
-    for line in lines:
-        parsed = _parse_env_assignment_line(line)
-        if parsed and parsed[0] == key:
-            if not replaced:
-                out.append(rendered)
-                replaced = True
-            continue
-        out.append(line)
-    if not replaced:
-        if out and out[-1].strip():
-            out.append("")
-        out.append(rendered)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
-
-
-def _unset_env_key(path: Path, key: str) -> bool:
-    try:
-        if not path.exists():
-            return False
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return False
-
-    out: list[str] = []
-    removed = False
-    for line in lines:
-        parsed = _parse_env_assignment_line(line)
-        if parsed and parsed[0] == key:
-            removed = True
-            continue
-        out.append(line)
-
-    if removed:
-        path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
-    return removed
-
-
-def _normalize_config_key(raw: str) -> str | None:
-    token = str(raw or "").strip()
-    if not token:
-        return None
-    alias_hit = CONFIG_KEY_ALIASES.get(token.lower())
-    if alias_hit:
-        return alias_hit
-    direct = token.upper()
-    if direct in CONFIG_KEYS_SET:
-        return direct
-    return None
-
-
-def _mask_config_value(key: str, value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "(unset)"
-    if key in CONFIG_SECRET_KEYS:
-        if len(text) <= 8:
-            return "*" * len(text)
-        return f"{text[:4]}...{text[-4:]}"
-    return text
-
-
-def _effective_config_value(key: str) -> str:
-    try:
-        import core.config as cfg
-
-        attr = CONFIG_ATTR_OVERRIDES.get(key, key)
-        if hasattr(cfg, attr):
-            return str(getattr(cfg, attr))
-    except Exception:
-        pass
-    return str(os.getenv(key, "") or "")
-
-
-def _reload_runtime_config_modules() -> tuple[bool, str]:
-    try:
-        refresh_runtime_config(override=True)
-        return True, ""
-    except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}"
-
-
-def _print_config_help() -> None:
-    print("Usage:")
-    print("  /config")
-    print("  /config show")
-    print("  /config get <key|alias>")
-    print("  /config set <key|alias> <value>")
-    print("  /config unset <key|alias>")
-    print("  /config path")
-    print(
-        "Aliases: api, model, key, base_url, timeout, max_tokens, retries, serpapi, "
-        "provider, provider_order, allow_fallbacks, site_url, app_name"
-    )
-    print()
-
-
-def _print_config_show(env_path: Path) -> None:
-    saved = _read_env_map(env_path)
-    print(f"Config file: {env_path}")
-    print("Editable config:")
-    for key in CONFIG_KEYS:
-        effective = _effective_config_value(key)
-        source = "file" if key in saved else "runtime/default"
-        print(f"  {key:<25} {_mask_config_value(key, effective):<30} [{source}]")
-    print()
-
-
-def _handle_config_command(raw_args: str, *, env_path: Path) -> str | None:
-    """Handle a /config command. Returns the changed key name if model-related, else None."""
-    text = str(raw_args or "").strip()
-    if not text:
-        _print_config_show(env_path)
-        _print_config_help()
-        return None
-
-    tokens = _split_shell_tokens(text)
-    if not tokens:
-        _print_config_show(env_path)
-        _print_config_help()
-        return None
-
-    action = str(tokens[0] or "").strip().lower()
-    if action in {"show", "list"}:
-        _print_config_show(env_path)
-        return None
-    if action == "path":
-        print(f"{env_path}\n")
-        return None
-
-    if action == "get":
-        if len(tokens) < 2:
-            print("Usage: /config get <key|alias>\n")
-            return None
-        key = _normalize_config_key(tokens[1])
-        if not key:
-            print(f"Unsupported key/alias: {tokens[1]!r}\n")
-            return None
-        value = _effective_config_value(key)
-        print(f"{key}={_mask_config_value(key, value)}\n")
-        return None
-
-    if action == "set":
-        if len(tokens) < 3:
-            print("Usage: /config set <key|alias> <value>\n")
-            return None
-        key = _normalize_config_key(tokens[1])
-        if not key:
-            print(f"Unsupported key/alias: {tokens[1]!r}\n")
-            return None
-        value = " ".join(tokens[2:]).strip()
-        _upsert_env_key(env_path, key, value)
-        os.environ[key] = value
-        reloaded, err = _reload_runtime_config_modules()
-        if reloaded:
-            print(f"Saved: {key}={_mask_config_value(key, value)} (runtime refreshed)\n")
-        else:
-            print(f"Saved: {key}={_mask_config_value(key, value)}")
-            print(f"Runtime refresh warning: {err}")
-            print("Restart CLI if the new value does not take effect.\n")
-        return key if key in MODEL_RELATED_KEYS else None
-
-    if action == "unset":
-        if len(tokens) < 2:
-            print("Usage: /config unset <key|alias>\n")
-            return None
-        key = _normalize_config_key(tokens[1])
-        if not key:
-            print(f"Unsupported key/alias: {tokens[1]!r}\n")
-            return None
-        removed = _unset_env_key(env_path, key)
-        os.environ.pop(key, None)
-        reloaded, err = _reload_runtime_config_modules()
-        if removed:
-            if reloaded:
-                print(f"Removed: {key} (runtime refreshed)\n")
-            else:
-                print(f"Removed: {key}")
-                print(f"Runtime refresh warning: {err}")
-                print("Restart CLI if the new value does not take effect.\n")
-        else:
-            print(f"{key} was not set in {env_path}\n")
-        return key if key in MODEL_RELATED_KEYS else None
-
-    _print_config_help()
-    return None
-
-
-# ---------------------------------------------------------------------------
-# /skills helpers
-# ---------------------------------------------------------------------------
-
-def _parse_skills_args(raw: str, *, default_limit: int = 5) -> tuple[str, int, str | None]:
-    text = str(raw or "").strip()
-    if not text:
-        return "", default_limit, None
-    tokens = _split_shell_tokens(text)
-
-    limit = max(1, int(default_limit))
-    query_tokens: list[str] = []
-
-    i = 0
-    while i < len(tokens):
-        tok = str(tokens[i] or "").strip()
-        if tok in {"-n", "--n", "--num", "--limit"}:
-            if i + 1 >= len(tokens):
-                return "", limit, "missing value for -n/--limit"
-            val = str(tokens[i + 1] or "").strip()
-            try:
-                n = int(val)
-            except Exception:
-                return "", limit, f"invalid number for -n: {val!r}"
-            if n <= 0:
-                return "", limit, "-n must be >= 1"
-            limit = min(n, 50)
-            i += 2
-            continue
-        if tok.startswith("-n=") or tok.startswith("--n=") or tok.startswith("--num=") or tok.startswith("--limit="):
-            _, val = tok.split("=", 1)
-            val = str(val or "").strip()
-            try:
-                n = int(val)
-            except Exception:
-                return "", limit, f"invalid number for -n: {val!r}"
-            if n <= 0:
-                return "", limit, "-n must be >= 1"
-            limit = min(n, 50)
-            i += 1
-            continue
-        query_tokens.append(tok)
-        i += 1
-
-    return " ".join(query_tokens).strip(), limit, None
-
-
-def _print_cloud_skills(query: str, *, top_k: int = 5) -> None:
-    from cli.skill_search import load_cloud_skill_catalog, search_cloud_skills
-
-    q = str(query or "").strip()
-    entries, meta = load_cloud_skill_catalog()
-    if not entries:
-        err = str(meta.get("error") or "cloud catalog unavailable").strip()
-        ref = str(meta.get("catalog_ref") or "").strip()
-        print(f"Cloud skills unavailable: {err}")
-        if ref:
-            print(f"catalog: {ref}")
-        print("Tip: set `SKILL_DYNAMIC_FETCH_CATALOG_JSONL` to a JSONL file path or https URL.")
-        print()
-        return
-
-    results = search_cloud_skills(q, entries, top_k=top_k)
-    if not results:
-        print(f"Cloud skills: no matches for query `{q}`.\n")
-        return
-
-    source = str(meta.get("source") or "unknown").strip()
-    cached = bool(meta.get("cached"))
-    stale = bool(meta.get("stale"))
-    flags = []
-    if cached:
-        flags.append("cached")
-    if stale:
-        flags.append("stale")
-    flag_text = f" ({', '.join(flags)})" if flags else ""
-    title = q or "(top skills)"
-    print(f"Cloud Skills for `{title}`: {len(results)} result(s)  [source={source}{flag_text}, n={top_k}]")
-    for idx, item in enumerate(results, 1):
-        name = str(item.get("name") or "").strip() or "(unknown)"
-        desc = str(item.get("description") or "").strip()
-        stars = int(item.get("stars") or 0)
-        author = str(item.get("author") or "").strip()
-        github_url = str(item.get("githubUrl") or "").strip()
-
-        meta_bits = [f"stars={stars}"]
-        if author:
-            meta_bits.append(f"author: {author}")
-
-        print(f"{idx}. {name}  ({', '.join(meta_bits)})")
-        if desc:
-            print(f"   {desc}")
-        if github_url:
-            print(f"   github: {github_url}")
-    print()
-
-
-# ---------------------------------------------------------------------------
-# History display
-# ---------------------------------------------------------------------------
-
-def _print_history_window(sessions: list[dict[str, Any]], limit: int = 12) -> None:
-    total = len(sessions)
-    if total == 0:
-        print("+--------------------------------------------------+")
-        print("| Session History                                  |")
-        print("+--------------------------------------------------+")
-        print("| No saved sessions yet.                           |")
-        print("+--------------------------------------------------+\n")
-        return
-
-    limit = max(1, min(int(limit), 200))
-    shown = sessions[-limit:]
-    start_idx = total - len(shown) + 1
-    width = max(80, min(140, shutil.get_terminal_size((100, 20)).columns))
-    inner = width - 2
-    text_width = inner - 2
-
-    panel_title = f" Session History (showing {len(shown)}/{total}) "
-    panel_title = panel_title[:inner]
-
-    print("+" + "-" * (width - 2) + "+")
-    print("|" + panel_title.ljust(inner) + "|")
-    print("+" + "-" * (width - 2) + "+")
-
-    for idx, session in enumerate(shown, start=start_idx):
-        title = str(session.get("title") or "Untitled Session").strip() or "Untitled Session"
-        session_id = str(session.get("id") or "").strip()
-        updated_at = str(session.get("updated_at") or "").strip()
-        messages = session.get("messages")
-        msg_count = len(messages) if isinstance(messages, list) else 0
-        turns = msg_count // 2
-
-        header = f"[{idx}] {title}"
-        print("| " + header[:text_width].ljust(text_width) + " |")
-        meta = f"id={session_id}  turns={turns}  messages={msg_count}  updated={updated_at}"
-        wrapped_meta = textwrap.wrap(
-            meta,
-            width=max(20, text_width),
-            replace_whitespace=True,
-            drop_whitespace=True,
-            break_long_words=False,
-        ) or ["(empty)"]
-        for line in wrapped_meta:
-            print("| " + line[:text_width].ljust(text_width) + " |")
-        print("| " + ("-" * text_width) + " |")
-
-    print("+" + "-" * (width - 2) + "+\n")
-
-
-def _collect_history_sessions(
-    store: dict[str, Any],
-    *,
-    active_session: dict[str, Any],
-    history: list[dict[str, str]],
-) -> list[dict[str, Any]]:
-    sessions_raw = store.get("sessions")
-    sessions = list(sessions_raw) if isinstance(sessions_raw, list) else []
-    active_id = str(active_session.get("id") or "").strip()
-    has_active = any(
-        isinstance(item, dict) and str(item.get("id") or "").strip() == active_id
-        for item in sessions
-    )
-    if not has_active and history:
-        sessions.append(
-            {
-                "id": active_id,
-                "title": str(active_session.get("title") or "").strip() or "Current Session",
-                "updated_at": str(active_session.get("updated_at") or "").strip() or _now_iso(),
-                "messages": list(history),
-                "internal_turns": list(active_session.get("internal_turns") or []),
-            }
-        )
-    return sessions
-
-
-# ---------------------------------------------------------------------------
-# Banner & display
-# ---------------------------------------------------------------------------
-
-def _print_cli_banner() -> None:
-    print(ANSI_CYAN)
-    print("+" + "=" * 71 + "+")
-    print("|" + " " * 71 + "|")
-    print("|   MEMENTO-S  —  Multi-turn Agent CLI" + " " * 33 + "|")
-    print("|" + " " * 71 + "|")
-    print("+" + "=" * 71 + "+")
-    print(ANSI_RESET)
 
 
 def _print_help() -> None:
-    print("Commands:")
-    print("  /       Show slash command menu (auto popup while typing)")
-    print("  /help   Show this help")
-    print("  /status Show session status")
-    print("  /skills [query] [-n N] Search cloud skills (or list local skills)")
-    print("  /config [show|get|set|unset] Manage API/model config in .env")
-    print("  /history [N] Show session history window (default: 12 sessions)")
-    print("  /history load <index> Load one saved session into current context")
-    print("  /clear  Clear conversation context/history")
-    print("  /exit   Exit the CLI")
-    print("  Ctrl+C  Interrupt current running task")
-    print()
-
-
-def _print_slash_menu() -> None:
-    print("Slash commands:")
+    table = Table(title="Slash Commands", show_header=True, header_style="bold magenta")
+    table.add_column("Command", style="cyan", no_wrap=True)
+    table.add_column("Description", style="dim")
     for cmd, desc in SLASH_COMMANDS:
-        print(f"  {cmd:<12} {desc}")
-    print()
+        table.add_row(cmd, desc)
+    console.print(table)
 
 
-def _print_slash_suggestions(raw: str) -> None:
-    token = str(raw or "").strip()
-    if not token.startswith("/"):
-        return
-    candidate_cmds = [cmd for cmd, _ in SLASH_COMMANDS]
-    matches = [cmd for cmd in candidate_cmds if cmd.startswith(token)]
-    if not matches:
-        print(f"Unknown command: {token}")
-        print("Type `/` to list available commands.\n")
-        return
-    print(f"Unknown command: {token}")
-    print("Did you mean:")
-    for cmd in matches:
-        print(f"  {cmd}")
-    print()
-
-
-def _print_status(
-    *,
-    model: str,
-    turn_count: int,
-    messages_count: int,
-    tool_names: list[str],
-    debug: bool,
-    session_title: str,
-) -> None:
-    print("Status:")
-    print(f"  model: {model}")
-    print(f"  turns: {turn_count}")
-    print(f"  context_messages: {messages_count}")
-    print(f"  tools: {', '.join(tool_names) if tool_names else '(none)'}")
-    print(f"  session_title: {session_title or '(untitled)'}")
-    print(f"  debug: {debug}")
-    print()
-
-
-# ---------------------------------------------------------------------------
-# AgentSession — holds MCPAgent + multi-turn message history
-# ---------------------------------------------------------------------------
-
-class AgentSession:
-    """Manages the MCPAgent lifecycle and accumulated conversation messages."""
-
-    def __init__(self, *, base_dir: Path | None = None, debug: bool = False) -> None:
-        self.messages: list[dict[str, str]] = []
-        self.debug = debug
-        self._base_dir = base_dir
-        self.agent: Any = None  # MCPAgent instance
-
-    async def start(self) -> None:
-        from core.model_factory import build_chat_model
-        from core.mcp_agent import MCPAgent
-
-        model = build_chat_model()
-        self.agent = MCPAgent(model=model, base_dir=self._base_dir)
-        await self.agent.start()
-        if self.debug:
-            print(f"[debug] MCPAgent started, tools: {self.agent.tool_names}")
-
-    async def rebuild(self) -> None:
-        """Close and rebuild the agent after config changes."""
-        if self.agent is not None:
-            await self.agent.close()
-        await self.start()
-        print("Agent rebuilt with new model config.\n")
-
-    async def close(self) -> None:
-        if self.agent is not None:
-            await self.agent.close()
-            self.agent = None
-
-    def clear(self) -> None:
-        """Reset conversation messages."""
-        self.messages.clear()
-
-    @property
-    def model_name(self) -> str:
-        return os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
-
-    @property
-    def tool_names(self) -> list[str]:
-        if self.agent is not None:
-            return self.agent.tool_names
-        return []
-
-
-# ---------------------------------------------------------------------------
-# Turn execution (streaming)
-# ---------------------------------------------------------------------------
-
-async def _execute_turn_streaming(
-    session: AgentSession,
-    user_text: str,
-    *,
-    debug: bool = False,
-) -> str:
-    """Run one user turn through the MCPAgent, streaming output to stdout."""
-    session.messages.append({"role": "user", "content": user_text})
-
-    final_text = ""
+def _print_status(session_id: str, agent_instance: "MementoSAgent", turn_count: int) -> None:
+    model = g_settings.llm_model or "default"
+    provider = g_settings.llm_api or "openai"
+    skills = []
     try:
-        async for chunk in session.agent.stream(session.messages):
-            # LangGraph stream_mode="updates" yields dicts keyed by node name.
-            # The "agent" node contains LLM output messages.
-            if isinstance(chunk, dict):
-                for node_name, update in chunk.items():
-                    if not isinstance(update, dict):
-                        continue
-                    msgs = update.get("messages", [])
-                    if not isinstance(msgs, list):
-                        continue
-                    for msg in msgs:
-                        # Tool call messages (from agent deciding to use a tool)
-                        tool_calls = getattr(msg, "tool_calls", None)
-                        if tool_calls and debug:
-                            for tc in tool_calls:
-                                name = tc.get("name", "?") if isinstance(tc, dict) else getattr(tc, "name", "?")
-                                print(f"[debug] tool_call: {name}")
+        skills = list(agent_instance.skill_manager.skills.keys())
+    except Exception:
+        pass
 
-                        # Tool result messages
-                        if hasattr(msg, "type") and msg.type == "tool":
-                            if debug:
-                                content = str(getattr(msg, "content", ""))
-                                preview = content[:200] + "..." if len(content) > 200 else content
-                                print(f"[debug] tool_result: {preview}")
-                            continue
+    console.print(f"  [bold]Model[/bold]      {model} [dim]({provider})[/dim]")
+    console.print(f"  [bold]Session[/bold]    {session_id}")
+    console.print(f"  [bold]Turns[/bold]      {turn_count}")
+    console.print(f"  [bold]Workspace[/bold]  {g_settings.workspace_path}")
+    if skills:
+        console.print(f"  [bold]Skills[/bold]     {', '.join(skills[:15])}" + (" ..." if len(skills) > 15 else ""))
+    console.print()
 
-                        # AI text messages (final or intermediate)
-                        content = getattr(msg, "content", None)
-                        if isinstance(content, str) and content.strip():
-                            # Only print the last AI message (final answer)
-                            final_text = content.strip()
-    except KeyboardInterrupt:
-        raise TurnInterrupted(partial_reply=final_text)
 
-    if final_text:
-        print(f"Assistant> {final_text}\n")
-        session.messages.append({"role": "assistant", "content": final_text})
+def _handle_clear() -> str:
+    new_id = generate_session_id()
+    console.print(f"  [green]Session cleared.[/green] New session: [bold]{new_id}[/bold]\n")
+    return new_id
+
+
+def _handle_history(args: str, agent_instance: "MementoSAgent") -> str | None:
+    """Handle /history commands. Returns new session_id if loading, else None."""
+    parts = args.strip().split()
+
+    # /history load <id>
+    if len(parts) >= 2 and parts[0] == "load":
+        target = parts[1]
+        existing = agent_instance.session_manager.list_sessions()
+        if target not in existing:
+            console.print(f"  [red]Session '{target}' not found.[/red]")
+            return None
+        console.print(f"  [green]Switched to session:[/green] [bold]{target}[/bold]\n")
+        return target
+
+    # /history [N]
+    sessions = agent_instance.session_manager.list_sessions()
+    if not sessions:
+        console.print("  [dim]No saved sessions.[/dim]\n")
+        return None
+
+    limit = 20
+    if parts and parts[0].isdigit():
+        limit = int(parts[0])
+
+    table = Table(title="Sessions", show_header=True, header_style="bold magenta")
+    table.add_column("#", style="dim", no_wrap=True)
+    table.add_column("Session ID", style="cyan")
+    table.add_column("Title", style="green")
+
+    for idx, sid in enumerate(sessions[:limit], 1):
+        title = ""
+        try:
+            data = agent_instance.session_manager.get_session(sid)
+            title = (data or {}).get("title", "")
+        except Exception:
+            pass
+        table.add_row(str(idx), sid, title or "[dim]-[/dim]")
+
+    console.print(table)
+    if len(sessions) > limit:
+        console.print(f"  [dim]Showing {limit}/{len(sessions)}. Use /history {limit + 20} to see more.[/dim]")
+    console.print(f"  [dim]Load a session: /history load <session_id>[/dim]\n")
+    return None
+
+
+def _handle_config_inline(args: str) -> None:
+    """Handle /config sub-commands inline."""
+    from cli.config import list_config, get_config, set_config, unset_config
+
+    parts = args.strip().split(maxsplit=2)
+    sub = parts[0] if parts else ""
+
+    if sub in ("", "show", "list"):
+        list_config()
+    elif sub == "get" and len(parts) >= 2:
+        get_config(parts[1])
+    elif sub == "set" and len(parts) >= 3:
+        set_config(parts[1], parts[2])
+    elif sub == "unset" and len(parts) >= 2:
+        unset_config(parts[1])
     else:
-        # Fallback: try non-streaming run if streaming yielded nothing
-        try:
-            result = await session.agent.run(session.messages)
-            msgs = result.get("messages", [])
-            if msgs:
-                last_msg = msgs[-1]
-                content = getattr(last_msg, "content", None) or ""
-                if isinstance(content, str) and content.strip():
-                    final_text = content.strip()
-                    print(f"Assistant> {final_text}\n")
-                    session.messages.append({"role": "assistant", "content": final_text})
-        except KeyboardInterrupt:
-            raise TurnInterrupted(partial_reply="")
-
-    if not final_text:
-        final_text = "(no response)"
-        print(f"Assistant> {final_text}\n")
-        session.messages.append({"role": "assistant", "content": final_text})
-
-    return final_text
+        console.print("  [dim]Usage: /config [show|get <key>|set <key> <val>|unset <key>][/dim]")
 
 
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Memento-S Multi-turn Agent CLI")
-    parser.add_argument(
-        "prompt",
-        nargs="*",
-        help="Run one prompt and exit. If omitted, starts interactive mode.",
-    )
-    parser.add_argument(
-        "--debug",
-        action=argparse.BooleanOptionalAction,
-        default=DEBUG,
-        help="Show debug output (tool calls, timing).",
-    )
-    parser.add_argument("--no-banner", action="store_true", help="Suppress startup banner.")
-    return parser
+def _suggest_command(cmd: str) -> None:
+    """Suggest a similar slash command for unknown input."""
+    import difflib
+    known = [c for c, _ in SLASH_COMMANDS]
+    matches = difflib.get_close_matches(cmd, known, n=1, cutoff=0.4)
+    console.print(f"  [yellow]Unknown command: {cmd}[/yellow]")
+    if matches:
+        console.print(f"  [dim]Did you mean [bold]{matches[0]}[/bold]?[/dim]")
+    else:
+        console.print("  [dim]Type /help for available commands.[/dim]")
+    console.print()
 
 
-# ---------------------------------------------------------------------------
-# Main async loop
-# ---------------------------------------------------------------------------
+def memento_entry() -> None:
+    if len(sys.argv) == 1:
+        sys.argv.append("agent")
+    app()
 
-async def _async_main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    debug = bool(args.debug)
 
-    # Persistence
-    history_file = (Path.cwd() / DEFAULT_HISTORY_FILE).resolve()
-    history_store = _load_history_store(history_file)
-    env_file = DEFAULT_ENV_FILE
-    active_session_meta: dict[str, Any] = _new_session()
-    turn_count = 0
+from prompt_toolkit.completion import Completer, Completion
 
-    # Build agent session
-    session = AgentSession(base_dir=WORKSPACE_DIR, debug=debug)
-    try:
-        await session.start()
-    except Exception as exc:
-        print(f"Error: failed to start MCPAgent: {exc}")
-        return 1
 
-    # ------------------------------------------------------------------
-    # Helpers for recording turns
-    # ------------------------------------------------------------------
-    def _record_turn(user_text: str, reply_text: str, *, interrupted: bool = False) -> None:
-        nonlocal turn_count, active_session_meta
-        turn_count += 1
-        if not str(active_session_meta.get("title") or "").strip():
-            active_session_meta["title"] = _build_session_title(user_text)
-        active_session_meta["updated_at"] = _now_iso()
-        active_session_meta["messages"] = list(session.messages)
+class _SlashCompleter(Completer):
+    """prompt_toolkit Completer that shows slash commands in a floating menu."""
 
-        internal_turns = active_session_meta.get("internal_turns")
-        turns = list(internal_turns) if isinstance(internal_turns, list) else []
-        turns.append(
-            {
-                "ts": _now_iso(),
-                "user": user_text,
-                "assistant": reply_text,
-                "interrupted": interrupted,
-            }
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+        for cmd, desc in SLASH_COMMANDS:
+            if cmd.startswith(text):
+                yield Completion(cmd, start_position=-len(text), display_meta=desc)
+
+
+class _InteractiveInput:
+
+    def __init__(self) -> None:
+        self._session = None
+
+    def setup(self) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.styles import Style
+
+        history_file = Path.home() / ".memento-s" / "history" / "cli_history"
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+
+        style = Style.from_dict({
+            "prompt": "bold cyan",
+            "": "",
+            # Transparent completion menu (no gray background)
+            "completion-menu":                "noinherit",
+            "completion-menu.completion":     "noinherit",
+            "completion-menu.completion.current": "bold cyan",
+            "completion-menu.meta.completion":          "noinherit #888888",
+            "completion-menu.meta.completion.current":  "noinherit #888888",
+        })
+        self._session = PromptSession(
+            message=[("class:prompt", "You › ")],
+            history=FileHistory(str(history_file)),
+            completer=_SlashCompleter(),
+            complete_while_typing=True,
+            style=style,
         )
-        if len(turns) > INTERNAL_TURN_LIMIT:
-            turns = turns[-INTERNAL_TURN_LIMIT:]
-        active_session_meta["internal_turns"] = turns
 
-        _upsert_session(history_store, active_session_meta)
-        _save_history_store(history_file, history_store)
+    def teardown(self, say_goodbye: bool = True) -> None:
+        if say_goodbye:
+            console.print("\n[dim]Bye![/dim]")
 
-    # ------------------------------------------------------------------
-    # Single-turn mode
-    # ------------------------------------------------------------------
-    if args.prompt:
-        user_text = " ".join(args.prompt).strip()
-        if not user_text:
-            await session.close()
-            return 1
+    async def prompt_async(self) -> str:
+        return await self._session.prompt_async()
+
+
+def _print_banner(workspace: Path, session_id: str) -> None:
+    banner = Text()
+    banner.append("Memento-S", style="bold cyan")
+    banner.append(f"  v{__version__}", style="dim")
+    console.print(Panel(banner, border_style="cyan", padding=(0, 2)))
+    console.print(f"  [dim]Workspace[/dim]  {workspace}")
+    console.print(f"  [dim]Session[/dim]    {session_id}")
+    console.print(f"  [dim]Model[/dim]      {g_settings.llm_model or 'default'}")
+    console.print()
+
+
+def _print_agent_response(response: str, render_markdown: bool) -> None:
+    content = response or ""
+    body = Markdown(content) if render_markdown else Text(content)
+    console.print()
+    console.print(
+        Panel(body, title="Memento-S Agent", title_align="left", border_style="cyan", padding=(0, 1))
+    )
+    console.print()
+
+
+
+class _StreamRenderer:
+
+    def __init__(self, render_markdown: bool, quiet: bool = False) -> None:
+        self._accumulated = ""
+        self._render_markdown = render_markdown
+        self._quiet = quiet
+        self._dispatch = {
+            "status": self._on_status,
+            "text_delta": self._on_text_delta,
+            "skill_call_start": self._on_skill_call_start,
+            "skill_call_result": self._on_skill_call_result,
+            "final": self._on_final,
+            "error": self._on_error,
+        }
+
+    def handle(self, event: dict) -> None:
+        handler = self._dispatch.get(event.get("type"))
+        if handler:
+            handler(event)
+
+    def flush(self) -> None:
+        if self._quiet:
+            self._accumulated = ""
+            return
+        if self._accumulated.strip():
+            clean = re.sub(r"</?thought>", "", self._accumulated).strip()
+            if clean:
+                console.print(f"  [dim]{clean}[/dim]")
+        self._accumulated = ""
+
+    def _on_status(self, event: dict) -> None:
+        self.flush()
+        if not self._quiet:
+            console.print(Rule(event["message"], style="cyan"))
+
+    def _on_text_delta(self, event: dict) -> None:
+        self._accumulated += event["content"]
+
+    def _on_skill_call_start(self, event: dict) -> None:
+        self.flush()
+        if self._quiet:
+            return
+        name = event["skill_name"]
+        args = json.dumps(event.get("arguments", {}), ensure_ascii=False)
+        console.print(f"  [bold yellow]{name}[/bold yellow]")
+        console.print(f"    [dim]IN:[/dim]  {args[:300]}")
+
+    def _on_skill_call_result(self, event: dict) -> None:
+        if self._quiet:
+            return
+        result = str(event.get("result", ""))
+        preview = result[:500] + "..." if len(result) > 500 else result
+        console.print(f"    [dim]OUT:[/dim] {preview}")
+
+    def _on_final(self, event: dict) -> None:
+        self.flush()
+        _print_agent_response(event["content"], self._render_markdown)
+
+    def _on_error(self, event: dict) -> None:
+        console.print(Panel(event.get("message", "Unknown error"), title="Error", border_style="red"))
+
+
+async def _run_stream(
+    agent_instance: "MementoSAgent",
+    session_id: str,
+    message: str,
+    render_markdown: bool,
+    quiet: bool = False,
+) -> None:
+    renderer = _StreamRenderer(render_markdown, quiet=quiet)
+    async for event in agent_instance.reply_stream(session_id=session_id, user_content=message):
+        renderer.handle(event)
+    renderer.flush()
+
+
+async def _run_interactive(
+    agent_instance: "MementoSAgent",
+    session_id: str,
+    inp: _InteractiveInput,
+    render_markdown: bool,
+    quiet: bool = False,
+) -> None:
+    _EXIT_COMMANDS = frozenset({"/q", ":q", "exit", "quit", "/exit", "/quit"})
+    state = {"session_id": session_id, "turns": 0}
+
+    while True:
         try:
-            reply = await _execute_turn_streaming(session, user_text, debug=debug)
-            _record_turn(user_text, reply)
-        except TurnInterrupted as intr:
-            partial = str(intr.partial_reply or "").strip()
-            reply = f"[interrupted] {partial}" if partial else "[interrupted]"
-            _record_turn(user_text, reply, interrupted=True)
-            print("\nInterrupted.")
-            await session.close()
-            return 130
-        except KeyboardInterrupt:
-            print("\nInterrupted.")
-            await session.close()
-            return 130
-        await session.close()
-        return 0
-
-    # ------------------------------------------------------------------
-    # Interactive REPL
-    # ------------------------------------------------------------------
-    if not args.no_banner:
-        _print_cli_banner()
-        print(f"Model: {session.model_name}")
-        print(f"Tools: {', '.join(session.tool_names)}")
-        print("Type /help for commands.\n")
-
-    prompt_session = _build_prompt_session()
-    if prompt_session is None:
-        print("Tip: install `prompt_toolkit` to enable dynamic slash menu while typing `/`.\n")
-
-    try:
-        while True:
-            # Read input
-            try:
-                if prompt_session is not None:
-                    user_text = str(await prompt_session.prompt_async("You> ")).strip()
-                else:
-                    user_text = input("You> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nBye.")
-                break
-
-            if not user_text:
+            user_input = await inp.prompt_async()
+            command = user_input.strip()
+            if not command:
                 continue
 
-            # Slash menu
-            if user_text == "/":
-                _print_slash_menu()
-                continue
+            low = command.lower()
 
-            # Exit
-            if user_text in EXIT_COMMANDS:
-                print("Bye.")
-                break
+            # ── exit ────────────────────────────────────────────
+            if low in _EXIT_COMMANDS:
+                inp.teardown()
+                return
 
-            # Help
-            if user_text in HELP_COMMANDS:
+            # ── slash commands ──────────────────────────────────
+            if low in ("/", "/help", "help"):
                 _print_help()
                 continue
 
-            cmd = user_text.strip().split(maxsplit=1)
-
-            # Status
-            if user_text in STATUS_COMMANDS:
-                current_title = str(active_session_meta.get("title") or "").strip()
-                _print_status(
-                    model=session.model_name,
-                    turn_count=turn_count,
-                    messages_count=len(session.messages),
-                    tool_names=session.tool_names,
-                    debug=debug,
-                    session_title=current_title,
-                )
+            if low in ("/status", "status"):
+                _print_status(state["session_id"], agent_instance, state["turns"])
                 continue
 
-            # Skills
-            if cmd and cmd[0] in SKILLS_COMMANDS:
-                arg = cmd[1].strip() if len(cmd) > 1 else ""
-                if not arg:
-                    try:
-                        if prompt_session is not None:
-                            arg = str(await prompt_session.prompt_async("Skills(query)> ")).strip()
-                        else:
-                            arg = input("Skills(query)> ").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        print()
-                        continue
-                    if not arg:
-                        # List local skills via MCP tool
-                        from core.mcp_server import list_local_skills
-                        result = list_local_skills()
-                        print(f"Local skills:\n{result}\n")
-                        print("Tip: use `/skills <query> -n 5` to search cloud skills.\n")
-                        continue
-
-                arg_norm = arg
-                if arg_norm.lower().startswith("cloud "):
-                    arg_norm = arg_norm[6:].strip()
-
-                query_text, top_k, parse_err = _parse_skills_args(arg_norm, default_limit=5)
-                if parse_err:
-                    print(f"Usage: /skills [query|local] [-n N] ({parse_err})\n")
-                    continue
-
-                if query_text.lower() == "local":
-                    from core.mcp_server import list_local_skills
-                    result = list_local_skills()
-                    print(f"Local skills:\n{result}\n")
-                    continue
-                _print_cloud_skills(query_text, top_k=top_k)
+            if low in ("/clear", "clear"):
+                state["session_id"] = _handle_clear()
+                state["turns"] = 0
                 continue
 
-            # Config
-            if cmd and cmd[0] in CONFIG_COMMANDS:
-                raw_args = cmd[1] if len(cmd) > 1 else ""
-                changed_key = _handle_config_command(raw_args, env_path=env_file)
-                if changed_key is not None:
-                    await session.rebuild()
+            if low.startswith("/history"):
+                args = command[len("/history"):].strip()
+                new_sid = _handle_history(args, agent_instance)
+                if new_sid is not None:
+                    state["session_id"] = new_sid
+                    state["turns"] = 0
                 continue
 
-            # Unknown slash command
-            if cmd and cmd[0].startswith("/") and cmd[0] not in KNOWN_SLASH_COMMANDS:
-                _print_slash_suggestions(cmd[0])
+            if low.startswith("/config"):
+                args = command[len("/config"):].strip()
+                _handle_config_inline(args)
                 continue
 
-            # History
-            if cmd and cmd[0] in HISTORY_COMMANDS:
-                sessions = _collect_history_sessions(
-                    history_store,
-                    active_session=active_session_meta,
-                    history=session.messages,
-                )
-                history_limit = 12
-                if len(cmd) > 1:
-                    raw_arg = cmd[1].strip()
-                    history_tokens = _split_shell_tokens(raw_arg)
-
-                    if history_tokens and str(history_tokens[0]).strip().lower() == "load":
-                        if len(history_tokens) != 2:
-                            print("Usage: /history load <index>\n")
-                            continue
-                        idx_raw = str(history_tokens[1] or "").strip()
-                        try:
-                            target_index = int(idx_raw)
-                        except Exception:
-                            print(f"Usage: /history load <index> (invalid index: {idx_raw!r})\n")
-                            continue
-                        if target_index <= 0:
-                            print("Usage: /history load <index> (index must be >= 1)\n")
-                            continue
-                        if target_index > len(sessions):
-                            print(
-                                f"History load failed: index {target_index} out of range "
-                                f"(1..{len(sessions) if sessions else 0}).\n"
-                            )
-                            continue
-                        selected = _sanitize_session(sessions[target_index - 1])
-                        if selected is None:
-                            print(f"History load failed: session #{target_index} is invalid.\n")
-                            continue
-
-                        loaded_history = _sanitize_history_items(selected.get("messages"))
-                        active_session_meta = selected
-                        session.messages = loaded_history[-SESSION_MESSAGE_LIMIT:]
-                        active_session_meta["messages"] = list(session.messages)
-                        turn_count = len(session.messages) // 2
-                        loaded_title = str(active_session_meta.get("title") or "").strip() or "Untitled Session"
-                        print(
-                            f"Loaded session #{target_index}: {loaded_title} "
-                            f"(messages={len(session.messages)}, turns={turn_count}).\n"
-                        )
-                        continue
-
-                    try:
-                        history_limit = int(raw_arg)
-                    except Exception:
-                        print("Usage: /history [N] | /history load <index>\n")
-                        continue
-                    if history_limit <= 0:
-                        print("Usage: /history [N] (N must be >= 1)\n")
-                        continue
-                _print_history_window(sessions, history_limit)
+            # ── unknown slash command ───────────────────────────
+            if command.startswith("/"):
+                _suggest_command(command.split()[0])
                 continue
 
-            # Clear
-            if user_text in CLEAR_COMMANDS:
-                session.clear()
-                turn_count = 0
-                active_session_meta = _new_session()
-                print("Context/history cleared.\n")
-                continue
-
-            # ----------------------------------------------------------
-            # Normal turn — run through MCPAgent
-            # ----------------------------------------------------------
-            interrupted = False
-            try:
-                reply = await _execute_turn_streaming(session, user_text, debug=debug)
-            except TurnInterrupted as intr:
-                interrupted = True
-                partial = str(intr.partial_reply or "").strip()
-                reply = f"[interrupted] {partial}" if partial else "[interrupted]"
-
-            _record_turn(user_text, reply, interrupted=interrupted)
-
-            if interrupted:
-                print("\nInterrupted current task. Partial context saved.\n")
-
-    finally:
-        await session.close()
-
-    return 0
+            # ── normal message → agent ──────────────────────────
+            await _run_stream(agent_instance, state["session_id"], command, render_markdown, quiet=quiet)
+            state["turns"] += 1
+        except (KeyboardInterrupt, EOFError):
+            inp.teardown()
+            return
 
 
-# ---------------------------------------------------------------------------
-# Sync entry point
-# ---------------------------------------------------------------------------
+@app.command()
+def agent(
+    message: str = typer.Option(None, "--message", "-m", help="Single message (non-interactive)"),
+    session_id: str | None = typer.Option(None, "--session", "-s", help="Session ID"),
+    markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render output as Markdown"),
+    quiet: bool = typer.Option(False, "--quiet/--no-quiet", "-q", help="Only show final agent response"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show verbose logs"),
+) -> None:
+    session_id = session_id or generate_session_id()
+    if logs:
+        setup_logging(level=g_settings.log_level, console_output=True)
+    else:
+        setup_logging(level=g_settings.log_level, log_file="memento_cli.log", console_output=False)
 
-def main(argv: list[str] | None = None) -> int:
-    return asyncio.run(_async_main(argv))
+    workspace = g_settings.workspace_path
+    agent_instance = MementoSAgent(workspace=workspace)
+    _print_banner(workspace, session_id)
+
+    if message:
+        asyncio.run(_run_stream(agent_instance, session_id, message, render_markdown=markdown, quiet=quiet))
+        return
+
+    inp = _InteractiveInput()
+    inp.setup()
+    console.print("[dim]Interactive mode. Type [bold]/help[/bold] for commands, [bold]/exit[/bold] or [bold]Ctrl+C[/bold] to quit.[/dim]\n")
+
+    asyncio.run(_run_interactive(agent_instance, session_id, inp, render_markdown=markdown, quiet=quiet))
+
+
+def _secret_display(key_lower: str, value: object) -> str:
+    if "max_tokens" in key_lower:
+        return str(value)
+    if any(k in key_lower for k in ("key", "token", "password", "secret")) and value:
+        s = str(value)
+        return f"{s[:4]}...{s[-4:]} (len={len(s)})" if len(s) > 10 else "***"
+    if value is None:
+        return "[dim]None[/dim]"
+    return str(value)
+
+
+@app.command()
+def doctor() -> None:
+    from dotenv import find_dotenv
+
+    console.print(Panel(Text("Memento-S Doctor", style="bold cyan"), border_style="cyan", padding=(0, 2)))
+    console.print()
+
+    ok, no = "[green]✓[/green]", "[red]✗[/red]"
+    project_root = g_settings.project_root
+    workspace = g_settings.workspace_path
+    conversations_dir = g_settings.conversations_path
+    console.print("[bold]Paths[/bold]")
+    console.print(f"  Project root:   {project_root} {ok if project_root.exists() else no}")
+    console.print(f"  Workspace:     {workspace} {ok if workspace.exists() else no}")
+    console.print(f"  Conversations: {conversations_dir} {ok if conversations_dir.exists() else no}")
+    env_path = find_dotenv()
+    console.print(f"  .env:          {Path(env_path) if env_path else '[dim]not found[/dim]'} {ok if env_path else '[yellow]![/yellow]'}")
+    console.print()
+
+    table = Table(title="Settings", show_header=True, header_style="bold magenta", expand=True)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="green", overflow="fold")
+    table.add_column("Env", style="dim")
+    for key in sorted(g_settings.model_dump().keys()):
+        value = g_settings.model_dump()[key]
+        field_info = g_settings.model_fields.get(key)
+        alias = (field_info.alias or "") if field_info else ""
+        table.add_row(key, _secret_display(key.lower(), value), alias)
+    for prop in ("workspace_path", "conversations_path", "data_directory", "skills_directory",
+                 "chroma_directory", "qwen3_tokenizer_path_resolved", "qwen3_model_path_resolved"):
+        try:
+            val = getattr(g_settings, prop)
+            table.add_row(prop, str(val) if val is not None else "[dim]None[/dim]", "[property]")
+        except Exception as e:
+            table.add_row(prop, f"[red]{e}[/red]", "[property]")
+    console.print(table)
+
+
+@app.command()
+def verify(
+    audit_only: bool = typer.Option(False, "--audit-only", help=" + "),
+    exec_only: bool = typer.Option(False, "--exec-only", help=" + "),
+    download_only: bool = typer.Option(False, "--download-only", help=" skill"),
+    sandbox: str = typer.Option("e2b", "--sandbox", help=": e2b / local"),
+    concurrency: int = typer.Option(3, "--concurrency", "-c", help="E2B "),
+    timeout: int = typer.Option(120, "--timeout", "-t", help=" skill ()"),
+    output: str = typer.Option(None, "--output", "-o", help=" JSON "),
+    test_set: str = typer.Option("test_set.jsonl", "--test-set", help=""),
+    cache_dir: str = typer.Option(".verify_cache/skills", "--cache-dir", help=""),
+    limit: int = typer.Option(None, "--limit", "-n", help=" N  ()"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help=""),
+) -> None:
+    import subprocess
+    cmd = [sys.executable, str(_PROJECT_ROOT / "scripts" / "verify_pipeline.py")]
+
+    if audit_only:
+        cmd.append("--audit-only")
+    elif exec_only:
+        cmd.append("--exec-only")
+    elif download_only:
+        cmd.append("--download-only")
+    else:
+        cmd.append("--all")
+
+    cmd.extend(["--sandbox", sandbox])
+    cmd.extend(["--concurrency", str(concurrency)])
+    cmd.extend(["--timeout", str(timeout)])
+    cmd.extend(["--test-set", test_set])
+    cmd.extend(["--cache-dir", cache_dir])
+
+    if output:
+        cmd.extend(["--output", output])
+    if limit:
+        cmd.extend(["--limit", str(limit)])
+    if verbose:
+        cmd.append("--verbose")
+
+    console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
+    result = subprocess.run(cmd)
+    raise typer.Exit(result.returncode)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    app()
