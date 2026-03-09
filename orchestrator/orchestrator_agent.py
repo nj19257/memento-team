@@ -89,6 +89,21 @@ When decomposing, you MUST copy ALL constraints from the original query into EVE
 - Negative constraints and scope boundaries
 For each subtask, include a "Format Example" — one sample row showing the exact columns and value conventions so workers produce consistent, mergeable output.
 
+## SUBTASK GRANULARITY — CRITICAL
+Each subtask MUST enumerate the specific sub-categories the worker should cover.
+Do NOT write vague instructions like "search for all X in period Y" — workers will only find the most obvious items.
+Instead, list every known sub-category explicitly so the worker searches each one individually.
+
+BAD:  "Search for all items in category X during period Y"
+GOOD: "Search for items in category X during period Y. You MUST search each of these sub-categories separately:
+  1. Sub-category A
+  2. Sub-category B
+  3. Sub-category C
+  ...and any other variants/editions not listed above.
+  Search each sub-category as a separate query. Do not rely on a single summary page."
+
+If you don't know all the sub-categories, list the ones you can infer and add "...and any other variants/editions not listed above".
+
 ## CRITICAL: Workers are STATELESS
 - Write SELF-CONTAINED descriptions with full details
 - Never write "find details for the above" — workers have no context

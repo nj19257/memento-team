@@ -181,6 +181,7 @@ class MementoTeams(App):
         layout: vertical;
         height: 3;
         margin-bottom: 1;
+        dock: bottom;
     }
 
     #action_row {
@@ -240,6 +241,7 @@ class MementoTeams(App):
         layout: vertical;
         height: 2fr;
         min-height: 18;
+        overflow-y: auto;
     }
 
     #left_workers {
