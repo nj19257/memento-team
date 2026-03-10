@@ -10,45 +10,30 @@ description: Identifies the task type and directs the orchestrator to the correc
 
 ## Task Types
 
-### split-by-rank-segment
-**Match when:** The query asks for a specific "Top N" list or a numbered ranking (e.g., "Top 50 movies," "100 best-selling albums"). The request relies on a pre-existing ordinal sequence.
-**Load skill:** `decompose-split-by-rank-segment`
-**Key signal:** Presence of ordinal numbers, "Top [X]," or "Ranked" phrasing.
-
 ### split-by-time-period
-**Match when:** The query specifies a continuous chronological range or a multi-year history (e.g., "from 2010 to 2024," "all releases in the 1990s").
+**Match when:** The query specifies a chronological range — continuous timelines, event logs, or periodic data (e.g., "from 2010 to 2024," "all earthquakes since 2000," "complete match history").
 **Load skill:** `decompose-split-by-time-period`
-**Key signal:** Date ranges, decades, or "year-by-year" requirements.
+**Key signal:** Date ranges, decades, "year-by-year", event histories, timelines.
 
 ### split-by-entity
-**Match when:** The query lists specific, discrete subjects like brand names, individual people, or specific product models that require deep attribute extraction (e.g., "Nikon Z6, Sony A7IV, and Canon R6").
+**Match when:** The query targets specific subjects requiring deep attribute extraction — named entities or category-scoped benchmarking (e.g., "Nikon Z6 vs Sony A7IV," "compare specs of all models in this product line").
 **Load skill:** `decompose-split-by-entity`
-**Key signal:** Proper nouns of specific products, companies, or individuals.
+**Key signal:** Proper nouns, spec sheets, benchmark comparisons, multi-attribute tables.
+
+### split-by-rank-segment
+**Match when:** The query involves ordinal rankings — static "Top N" lists or longitudinal annual rankings (e.g., "Top 50 movies," "annual GDP rankings 2010-2024," "yearly box office leaders").
+**Load skill:** `decompose-split-by-rank-segment`
+**Key signal:** "Top [X]," "ranked," "annual standings," ordinal numbers combined with rankings.
 
 ### split-by-category
 **Match when:** The query is organized by broad domain classifications, geographic regions, or institutional departments (e.g., "by country," "academic subjects," or "sports leagues").
 **Load skill:** `decompose-split-by-category`
 **Key signal:** Use of "by [Category Name]" or lists of distinct sectors/regions.
 
-### annual-rank-stats
-**Match when:** The query asks for annual statistics, yearly rankings, or season-by-season performance data (e.g., "annual GDP rankings," "yearly box office leaders," "season stats for each year").
-**Load skill:** `decompose-annual-rank-stats`
-**Key signal:** "annual," "yearly," "per season," combined with rankings or statistics.
-
-### entity-benchmarking
-**Match when:** The query requires collecting multi-attribute specifications or benchmark data across a defined set of entities (e.g., "compare specs of these 10 laptops," "benchmark all models in this product line").
-**Load skill:** `decompose-entity-benchmarking`
-**Key signal:** Spec sheets, benchmark comparisons, multi-attribute tables for known entities.
-
 ### geographic-registries
-**Match when:** The query involves location-based registries, inventories, or catalogs organized by geographic boundaries (e.g., "all UNESCO sites by country," "hospitals in each province," "national parks by state").
+**Match when:** The query involves location-based registries or catalogs organized by geographic boundaries (e.g., "all UNESCO sites by country," "hospitals in each province").
 **Load skill:** `decompose-geographic-registries`
 **Key signal:** Geographic partitioning, "by country/state/region," registry or inventory language.
-
-### temporal-event-logs
-**Match when:** The query asks for a chronological log of discrete events, incidents, or occurrences (e.g., "all earthquakes above magnitude 6 since 2000," "product recall history," "timeline of policy changes").
-**Load skill:** `decompose-temporal-event-logs`
-**Key signal:** Event logs, incident histories, timelines of discrete occurrences (not continuous product releases — use split-by-time-period for those).
 
 ## Default Fallback
 If no type matches clearly, use general decomposition principles:

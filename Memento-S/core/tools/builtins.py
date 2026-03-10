@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
@@ -39,6 +40,7 @@ _skill_library: Any = None
 _cloud_catalog: Any = None
 _skill_manager: Any = None
 _workboard_path: Path | None = None
+workboard_lock = threading.Lock()  # shared lock — also used by mcp_server.py
 
 
 def configure(
@@ -331,7 +333,12 @@ async def read_workboard_tool(tag: str = "") -> str:
     """Read the shared workboard, optionally filtering by tag."""
     if _workboard_path is None or not _workboard_path.exists():
         return "(no workboard exists)"
-    content = await asyncio.to_thread(_workboard_path.read_text, "utf-8")
+
+    def _read() -> str:
+        with workboard_lock:
+            return _workboard_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
+
+    content = await asyncio.to_thread(_read)
     if not tag:
         return content
     pattern = re.compile(
@@ -362,15 +369,16 @@ async def edit_workboard_tool(tag: str, content: str) -> str:
         )
 
     def _run() -> str:
-        board = _workboard_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
-        pattern = re.compile(
-            rf"(<{re.escape(tag)}>)(.*?)(</{re.escape(tag)}>)", re.DOTALL
-        )
-        new_board, n = pattern.subn(rf"\g<1>\n{content}\n\g<3>", board, count=1)
-        if n == 0:
-            return f"edit_workboard ERR: tag '{tag}' not found in workboard"
-        _workboard_path.write_text(new_board, encoding="utf-8")  # type: ignore[union-attr]
-        return f"edit_workboard OK: tag '{tag}' updated"
+        with workboard_lock:
+            board = _workboard_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
+            pattern = re.compile(
+                rf"(<{re.escape(tag)}>)(.*?)(</{re.escape(tag)}>)", re.DOTALL
+            )
+            new_board, n = pattern.subn(rf"\g<1>\n{content}\n\g<3>", board, count=1)
+            if n == 0:
+                return f"edit_workboard ERR: tag '{tag}' not found in workboard"
+            _workboard_path.write_text(new_board, encoding="utf-8")  # type: ignore[union-attr]
+            return f"edit_workboard OK: tag '{tag}' updated"
 
     return await asyncio.to_thread(_run)
 
