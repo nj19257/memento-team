@@ -39,7 +39,7 @@ from fastmcp import FastMCP
 
 from core.agent.memento_s_agent import MementoSAgent
 from core.agent.session_manager import generate_session_id
-from core.tools.builtins import configure_workboard
+from core.tools.builtins import configure_workboard, workboard_lock
 
 import logging
 
@@ -77,62 +77,76 @@ mcp = FastMCP("MementoSWorkerPool")
 _semaphore = asyncio.Semaphore(MAX_POOL_SIZE)
 
 
-def _workboard_write(content: str) -> Path:
+def _workboard_write_sync(content: str) -> Path:
+    """Synchronous workboard write (for initial setup before async workers start)."""
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    WORKBOARD_PATH.write_text(content, encoding="utf-8")
+    with workboard_lock:
+        WORKBOARD_PATH.write_text(content, encoding="utf-8")
     return WORKBOARD_PATH
 
 
-def _workboard_read() -> str:
-    if not WORKBOARD_PATH.exists():
-        return "(no workboard exists)"
-    return WORKBOARD_PATH.read_text(encoding="utf-8")
+async def _workboard_read() -> str:
+    def _run() -> str:
+        if not WORKBOARD_PATH.exists():
+            return "(no workboard exists)"
+        with workboard_lock:
+            return WORKBOARD_PATH.read_text(encoding="utf-8")
+    return await asyncio.to_thread(_run)
 
 
-def _workboard_check_off_item(index_1_based: int) -> str:
-    if not WORKBOARD_PATH.exists():
-        return "check_off_item ERR: workboard does not exist"
-    content = WORKBOARD_PATH.read_text(encoding="utf-8")
-    pattern = re.compile(rf"^(\s*-\s)\[ \](\s+{index_1_based}\b)", re.MULTILINE)
-    new_content, n = pattern.subn(r"\1[x]\2", content, count=1)
-    if n == 0:
-        return f"check_off_item SKIP: item {index_1_based} not found or already checked"
-    WORKBOARD_PATH.write_text(new_content, encoding="utf-8")
-    return f"check_off_item OK: item {index_1_based}"
+async def _workboard_check_off_item(index_1_based: int) -> str:
+    def _run() -> str:
+        if not WORKBOARD_PATH.exists():
+            return "check_off_item ERR: workboard does not exist"
+        with workboard_lock:
+            content = WORKBOARD_PATH.read_text(encoding="utf-8")
+            pattern = re.compile(rf"^(\s*-\s)\[ \](\s+{index_1_based}\b)", re.MULTILINE)
+            new_content, n = pattern.subn(r"\1[x]\2", content, count=1)
+            if n == 0:
+                return f"check_off_item SKIP: item {index_1_based} not found or already checked"
+            WORKBOARD_PATH.write_text(new_content, encoding="utf-8")
+        return f"check_off_item OK: item {index_1_based}"
+    return await asyncio.to_thread(_run)
 
 
-def _workboard_append_result(index_1_based: int, text: str) -> str:
-    if not WORKBOARD_PATH.exists():
-        return "append_result ERR: workboard does not exist"
-    content = WORKBOARD_PATH.read_text(encoding="utf-8")
-    one_line = " ".join(str(text).split())[:200]
-    result_line = f"- Task {index_1_based}: {one_line}"
-    marker = "## Results"
-    marker_idx = content.find(marker)
-    if marker_idx == -1:
-        content = content.rstrip() + f"\n\n{marker}\n{result_line}\n"
-    else:
-        marker_line_end = content.find("\n", marker_idx)
-        if marker_line_end == -1:
-            content += f"\n{result_line}\n"
-        else:
-            insert_pos = len(content)
-            next_section = content.find("\n##", marker_line_end + 1)
-            if next_section != -1:
-                insert_pos = next_section + 1
-            content = content[:insert_pos].rstrip() + f"\n{result_line}\n" + content[insert_pos:]
-    WORKBOARD_PATH.write_text(content, encoding="utf-8")
-    return f"append_result OK: task {index_1_based}"
+async def _workboard_append_result(index_1_based: int, text: str) -> str:
+    def _run() -> str:
+        if not WORKBOARD_PATH.exists():
+            return "append_result ERR: workboard does not exist"
+        with workboard_lock:
+            content = WORKBOARD_PATH.read_text(encoding="utf-8")
+            one_line = " ".join(str(text).split())[:200]
+            result_line = f"- Task {index_1_based}: {one_line}"
+            marker = "## Results"
+            marker_idx = content.find(marker)
+            if marker_idx == -1:
+                content = content.rstrip() + f"\n\n{marker}\n{result_line}\n"
+            else:
+                marker_line_end = content.find("\n", marker_idx)
+                if marker_line_end == -1:
+                    content += f"\n{result_line}\n"
+                else:
+                    insert_pos = len(content)
+                    next_section = content.find("\n##", marker_line_end + 1)
+                    if next_section != -1:
+                        insert_pos = next_section + 1
+                    content = content[:insert_pos].rstrip() + f"\n{result_line}\n" + content[insert_pos:]
+            WORKBOARD_PATH.write_text(content, encoding="utf-8")
+        return f"append_result OK: task {index_1_based}"
+    return await asyncio.to_thread(_run)
 
 
-def _workboard_uses_tag_protocol() -> bool:
-    if not WORKBOARD_PATH.exists():
-        return False
-    try:
-        text = WORKBOARD_PATH.read_text(encoding="utf-8")
-    except Exception:
-        return False
-    return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
+async def _workboard_uses_tag_protocol() -> bool:
+    def _run() -> bool:
+        if not WORKBOARD_PATH.exists():
+            return False
+        try:
+            with workboard_lock:
+                text = WORKBOARD_PATH.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
+    return await asyncio.to_thread(_run)
 
 
 def _resolve_orchestrator_skill_dir(skill_name: str | None) -> Path | None:
@@ -434,8 +448,11 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
 
         # Write workboard if provided (workers receive a snapshot in their prompt)
         if workboard and workboard.strip():
-            board_path = _workboard_write(workboard)
+            board_path = _workboard_write_sync(workboard)
             _stderr_print(f"  [Workboard] Created at {board_path}")
+
+        # Configure workboard path once for all workers (global in builtins.py)
+        configure_workboard(WORKBOARD_PATH)
 
         async def run_one(subtask: str, idx: int) -> Dict[str, Any]:
             max_retries = 3
@@ -460,42 +477,31 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
 
                         # Build execution prompt with workboard context
                         execution_text = worker_input
-                        board_content = _workboard_read()
+                        board_content = await _workboard_read()
                         if board_content and board_content != "(no workboard exists)":
                             record("workboard_snapshot_read", bytes=len(board_content.encode("utf-8")))
                             tag_prefix = f"{subtask_id}_"
                             execution_text = (
                                 f"{worker_input}\n\n"
-                                "## Workboard — MANDATORY OUTPUT\n"
-                                "You MUST write your results to the workboard using `edit_workboard`. "
-                                "Your text reply alone is NOT delivered to the user — only workboard content is used.\n"
-                                f"Your subtask ID is `{subtask_id}`. Write results to `{tag_prefix}result` tag.\n"
-                                "Read the board first, then write your findings into your result tag.\n"
-                                f"**IMPORTANT**: When calling `edit_workboard(\"{tag_prefix}result\", content)`, "
-                                "the `content` must be ONLY your data rows (e.g. a markdown table). "
-                                "Do NOT include the full workboard template, other workers' tags, or section headers.\n\n"
-                                "## Skill Discovery — IMPORTANT\n"
-                                "Use `route_skill(\"your sub-task description\")` to find the best skill for this task.\n"
-                                "Then use `read_skill(\"skill-name\")` to learn how to use it.\n"
-                                "Do NOT guess skill names or import paths — always route first.\n\n"
-                                "## Execution Strategy (follow this order)\n"
-                                "Step 1 — PLAN: List every sub-category mentioned in your subtask as a checklist.\n"
-                                "Step 2 — SEARCH EACH ONE: For each sub-category, do a separate search query. "
-                                "Do NOT rely on a single summary page — it will miss variants.\n"
-                                "Step 3 — CROSS-CHECK: Use at least 2 different sources to verify completeness.\n"
-                                "Step 4 — COMPILE: Merge all findings into the required format and write to workboard.\n\n"
-                                "## CRITICAL RULES\n"
-                                "- You MUST write results to workboard using `edit_workboard` — your text reply is NOT delivered.\n"
-                                "- You have a MAXIMUM of 30 tool calls. Write to workboard BEFORE you run out.\n"
-                                "- NEVER repeat the same search/fetch more than twice. If it fails, skip that item and move on.\n"
-                                "- Incomplete results written to workboard are BETTER than perfect results that never get written.\n\n"
+                                "## OUTPUT — MANDATORY\n"
+                                "Your text reply is NOT delivered — only workboard content is used.\n"
+                                f"Write results to `{tag_prefix}result` tag via `edit_workboard(\"{tag_prefix}result\", content)`. "
+                                "Content must be ONLY your data rows (e.g. a markdown table), not the full board template.\n\n"
+                                "## WORKFLOW\n"
+                                "1. `route_skill(\"your task description\")` → `read_skill(\"skill-name\")` to find the right tool.\n"
+                                "2. Plan: list every sub-category in your subtask as a checklist.\n"
+                                "3. Search each one separately — do NOT rely on a single summary page.\n"
+                                "4. Cross-check with a second source, then compile and write to workboard.\n\n"
+                                "## RULES\n"
+                                "- MAXIMUM 30 tool calls. Write to workboard BEFORE you run out.\n"
+                                "- NEVER repeat the same search/fetch more than twice — skip and move on.\n"
+                                "- Incomplete results on workboard > perfect results that never get written.\n\n"
                                 f"```markdown\n{board_content}\n```"
                             )
                         record("worker_prompt_built", subtask_id=subtask_id, prompt_preview=execution_text[:500])
 
                         # Create a new MementoSAgent and run
                         agent = MementoSAgent(workspace=WORKSPACE_DIR)
-                        configure_workboard(WORKBOARD_PATH)
                         session_id = generate_session_id()
 
                         record("worker_agent_invoke_start", subtask_id=subtask_id)
@@ -517,11 +523,11 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         f"[MementoSWorkerPool] Subtask [{idx}] completed in {elapsed}s"
                     )
                     if workboard and workboard.strip():
-                        _workboard_check_off_item(idx + 1)
+                        await _workboard_check_off_item(idx + 1)
                         record("workboard_checkbox_update", subtask_id=subtask_id, item=idx + 1, status="checked")
-                        if not _workboard_uses_tag_protocol():
+                        if not await _workboard_uses_tag_protocol():
                             summary = result.strip().split("\n")[0][:200] if result.strip() else "completed"
-                            _workboard_append_result(idx + 1, summary)
+                            await _workboard_append_result(idx + 1, summary)
                             record("workboard_result_append", subtask_id=subtask_id, item=idx + 1, summary=summary)
                     record("worker_end", subtask_id=subtask_id, duration_seconds=elapsed, status="ok")
                     _print_trajectory(idx, trajectory)

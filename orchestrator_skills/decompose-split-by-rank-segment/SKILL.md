@@ -4,18 +4,22 @@ description: Specialized decomposition strategy for split-by-rank-segment tasks.
 ---
 
 ## When to Use
-This strategy is applicable when a query requests a specific "Top N" or "Bottom N" subset from a recognized, authoritative, and pre-ordered list. It is indicated by queries that specify a numerical range (e.g., 1-50, 51-100) and require multiple attributes for each entity within that ordinal sequence. Use this when the source data is likely to be published as a structured index or annual leaderboard.
+Use this strategy when data is organized by ordinal position or periodic rankings. Covers both:
+- **Static rankings** (e.g., "Top 50 movies", "100 best-selling albums") — single snapshot
+- **Longitudinal rankings** (e.g., "annual GDP rankings 2010-2024", "yearly box office leaders") — repeated snapshots over time
+Indicated by "Top N", "ranked", "annual standings", or queries combining rankings with time series.
 
 ## Decomposition Template
-1. **Identify the Authoritative Source and Version:** Determine the specific organization, publication, or index that maintains the ranking and the exact time period or version requested.
-2. **Segment the Rank Range:** Divide the total requested range into equal, manageable segments (e.g., segments of 25 or 50). The principle is to prevent context-window overflow and ensure high-precision retrieval for each specific ordinal position.
-3. **Define Attribute Extraction Requirements:** For each segment, specify the primary entity name and all secondary metrics or metadata required by the query.
-4. **Synthesize and Re-order:** Consolidate the outputs from all segments into a single structure, ensuring the ordinal integrity (1 to N) is preserved and no gaps exist between segments.
+1. **Identify the Primary Pivot:** Determine if the data is organized by rank (Top 1-50), by time (Year X), or both (Top 10 per year). Identify the authoritative source.
+2. **Segment by Pivot:** For rank-only: divide into segments of 25-50. For rank×time: assign one worker per year (or 1-3 years). Distinguish "Static Attributes" (entity name, origin) from "Variable Metrics" (value/rank in a given period).
+3. **Define Attribute Extraction Requirements:** Specify primary entity name and all secondary metrics or metadata required.
+4. **Synthesize and Re-order:** Consolidate into a single structure, ensuring ordinal integrity (1 to N) and chronological order are preserved.
 
 ## Worker Assignment Rules
-- **Partitioning:** Assign one worker per 25-50 rows. Smaller segments are preferred if the query requires more than 3-4 complex attributes per entity.
+- **Partitioning:** For rank-only tasks: one worker per 25-50 rows. For rank×time tasks: one worker per 1-3 years. **Always prefer more workers with narrower scope.**
 - **Overlap Prevention:** Ensure segment boundaries are explicit (e.g., Worker 1: Ranks 1-25; Worker 2: Ranks 26-50) to avoid duplicate entries.
-- **Verification:** If the ranking is subject to frequent updates or multiple versions (e.g., "Preliminary" vs "Final"), assign a verification worker to cross-reference the top and bottom entities of each segment against the source index.
+- **Re-ranking Awareness:** Each time period is a fresh ranking — do not assume an entity's rank is static across years.
+- **Verification:** If the ranking has multiple versions (e.g., "Preliminary" vs "Final"), assign a verification worker.
 
 ## Required Columns Checklist
 - **Ordinal Identifier:** The specific rank or position number (essential for maintaining sequence).

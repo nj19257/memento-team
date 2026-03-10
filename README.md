@@ -126,7 +126,9 @@ uv run --project Memento-S --with textual --with rich python -c "import sys; sys
 ```
 
 ## TUI
-
+```bash
+uv run python tui_app.py
+```
 - Submit tasks directly from the interface (`Ctrl+Enter` or **Run Task**)
 - Session-scoped worker list from `logs/worker-*.jsonl` (current task only)
 - Per-worker status label (`live` / `finished`)

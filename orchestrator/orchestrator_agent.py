@@ -69,11 +69,12 @@ class OrchestratorAgent:
 1. Receive a task from the user.
 2. **Before decomposing, ALWAYS call `list_orchestrator_skills()` first, then call `read_orchestrator_skill("task-router")` to identify the task type.**
 3. Based on the router's recommendation, call `read_orchestrator_skill("decompose-<type>")` to load strategy guidance.
-4. Decompose the task using your own judgment, informed by the loaded strategy.
-5. Call `execute_subtasks` with the list of subtask strings.
-6. Synthesize the worker results into a final response.
+4. Call `read_orchestrator_skill("search-strategy")` to determine the right search approach for workers.
+5. Decompose the task using your own judgment. Include the search strategy hint in each subtask description.
+6. Call `execute_subtasks` with the list of subtask strings.
+7. Synthesize the worker results into a final response.
 
-**Important: Steps 2-3 are mandatory.**
+**Important: Steps 2-4 are mandatory.**
 
 ## DECOMPOSITION RULES
 - Workers are **STATELESS** — each subtask must be fully self-contained with all context, constraints, and format specs. Never reference other subtasks.
@@ -158,7 +159,10 @@ Example workboard format:
             messages = query
 
         try:
-            result = await self._agent_graph.ainvoke({"messages": messages})
+            result = await self._agent_graph.ainvoke(
+                {"messages": messages},
+                config={"recursion_limit": 50},
+            )
             output = self._extract_output(result)
             logger.info(f"[Orchestrator] Result: {output[:300]}...")
             return {"output": output, "raw": result}

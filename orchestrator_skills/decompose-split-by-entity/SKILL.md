@@ -4,18 +4,18 @@ description: Specialized decomposition strategy for split-by-entity tasks requir
 ---
 
 ## When to Use
-Use this strategy when a query identifies a specific set of independent subjects (entities) and requests a uniform set of high-density attributes for each. This pattern is ideal when:
-- The entities belong to a clear category (e.g., products, organizations, creative works).
-- Each entity requires "deep-dive" research across multiple technical, financial, or historical dimensions.
-- The data for one entity does not depend on or overlap with the data of another.
-- The output is expected to be a comprehensive, multi-column comparison table.
+Use this strategy when a query identifies a set of independent subjects (entities) requiring uniform attribute extraction. Covers both:
+- **Named entity lists** (e.g., "specs for Nikon Z6, Sony A7IV, Canon R6")
+- **Category-scoped benchmarking** (e.g., "all models in this product line", "compare these 10 laptops")
+Ideal when each entity requires deep-dive research and data is independent across entities.
 
 ## Decomposition Template
 1.  **Entity Enumeration:** Identify the full list of primary subjects. If the query provides a range (e.g., "all models in series X"), the first subtask must be to generate an exhaustive list of these entities.
-2.  **Attribute Definition:** Standardize the required data points (metrics, dates, specifications) to ensure consistency across all workers.
-3.  **Horizontal Partitioning:** Divide the list of entities into small batches. Assign each batch to a separate worker.
-4.  **Deep-Dive Extraction:** Each worker performs targeted research for their assigned entities only, focusing on filling every required attribute column.
-5.  **Vertical Synthesis:** A final pass aggregates the independent rows into a single unified table, ensuring formatting (units, date formats) is synchronized.
+2.  **Attribute Definition (Master Schema):** Define a strict schema with units and definitions before partitioning. All workers must extract the same attributes in the same format.
+3.  **Horizontal Partitioning:** Divide entities into small batches. Group by common source (e.g., same manufacturer/publisher) to minimize redundant navigation.
+4.  **Temporal/Version Alignment:** If specs change over time, explicitly state which version/year to collect (e.g., "2025 specs" not "latest").
+5.  **Deep-Dive Extraction:** Each worker performs targeted research for their assigned entities only, focusing on filling every required attribute column.
+6.  **Vertical Synthesis:** A final pass aggregates the independent rows into a single unified table, ensuring formatting (units, date formats) is synchronized.
 
 ## Worker Assignment Rules
 - **Batch Size:** Assign 3–5 complex entities per worker. For simpler entities (e.g., single-attribute lists), this can increase to 10. **Always prefer more workers with smaller batches** — each worker has a limited tool call budget, so smaller scope = higher completeness.

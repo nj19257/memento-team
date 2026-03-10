@@ -2,7 +2,7 @@
 name = "memento-teams"
 version = "0.1.0"
 description = "Memento-Teams: Multi-agent orchestrator with TUI"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "textual",
     "rich",
@@ -33,6 +33,13 @@ dependencies = [
     "jieba>=0.42.1",
     "crawl4ai",
     "watchdog",
+]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux'",
 ]
 
 [build-system]

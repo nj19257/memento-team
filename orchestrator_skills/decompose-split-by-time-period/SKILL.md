@@ -4,7 +4,10 @@ description: Specialized decomposition strategy for tasks requiring exhaustive d
 ---
 
 ## When to Use
-Use this strategy when a query requires a comprehensive list of events, product releases, or periodic data points across a long, defined time range (e.g., multiple years or decades). This is indicated by requests for "every," "all," or "complete list" where the primary index for the data is a timestamp, date, or fiscal period. It is especially effective when the expected volume of data points exceeds the context window of a single model pass.
+Use this strategy when the primary index is a timestamp, date, or fiscal period. Covers both:
+- **Continuous product/release timelines** (e.g., "all CPU releases 2017-2024")
+- **Discrete event logs** (e.g., "all earthquakes above M6 since 2000", "complete match history")
+Indicated by "every," "all," "complete list/history" over a defined time range.
 
 ## Decomposition Template
 1. **Define the Boundary**: Identify the absolute start and end points of the requested period.
@@ -15,8 +18,9 @@ Use this strategy when a query requires a comprehensive list of events, product 
 
 ## Worker Assignment Rules
 - **Density-Based Partitioning**: Limit each worker to a range expected to yield 10–20 records. If a single year is known to be "event-heavy," assign that year to its own worker. **Always prefer more workers with narrower ranges** — each worker has a limited tool call budget, so smaller scope = higher completeness.
+- **Source-Era Awareness**: If the timeline spans different record-keeping eras (e.g., pre-digital vs. digital), partition by era since search strategies and source reliability differ.
 - **Overlap Handling**: Instruct workers to strictly adhere to `[Start Date, End Date]` boundaries to prevent double-counting or gaps.
-- **Verification Workers**: For high-precision tasks (e.g., financial data or legal records), assign a secondary worker to cross-verify a random 10% sample of the primary worker's findings.
+- **Verification Workers**: For high-precision tasks, assign a secondary worker to cross-verify a random 10% sample.
 
 ## Required Columns Checklist
 - **Primary Temporal Marker**: The specific date, month, or year of the occurrence.
