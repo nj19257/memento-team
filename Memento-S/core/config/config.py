@@ -67,7 +67,7 @@ class Settings(BaseSettings):
 
     agent_max_iterations: int = Field(
         alias="AGENT_MAX_ITERATIONS",
-        default=100,
+        default=60,
         description="ReAct  LLM+tool ",
     )
     log_level: str = Field(

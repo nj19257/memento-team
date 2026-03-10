@@ -374,7 +374,7 @@ async def edit_workboard_tool(tag: str, content: str) -> str:
             pattern = re.compile(
                 rf"(<{re.escape(tag)}>)(.*?)(</{re.escape(tag)}>)", re.DOTALL
             )
-            new_board, n = pattern.subn(rf"\g<1>\n{content}\n\g<3>", board, count=1)
+            new_board, n = pattern.subn(lambda m: m.group(1) + "\n" + content + "\n" + m.group(3), board, count=1)
             if n == 0:
                 return f"edit_workboard ERR: tag '{tag}' not found in workboard"
             _workboard_path.write_text(new_board, encoding="utf-8")  # type: ignore[union-attr]
