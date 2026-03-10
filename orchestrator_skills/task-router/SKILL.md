@@ -30,6 +30,26 @@ description: Identifies the task type and directs the orchestrator to the correc
 **Load skill:** `decompose-split-by-category`
 **Key signal:** Use of "by [Category Name]" or lists of distinct sectors/regions.
 
+### annual-rank-stats
+**Match when:** The query asks for annual statistics, yearly rankings, or season-by-season performance data (e.g., "annual GDP rankings," "yearly box office leaders," "season stats for each year").
+**Load skill:** `decompose-annual-rank-stats`
+**Key signal:** "annual," "yearly," "per season," combined with rankings or statistics.
+
+### entity-benchmarking
+**Match when:** The query requires collecting multi-attribute specifications or benchmark data across a defined set of entities (e.g., "compare specs of these 10 laptops," "benchmark all models in this product line").
+**Load skill:** `decompose-entity-benchmarking`
+**Key signal:** Spec sheets, benchmark comparisons, multi-attribute tables for known entities.
+
+### geographic-registries
+**Match when:** The query involves location-based registries, inventories, or catalogs organized by geographic boundaries (e.g., "all UNESCO sites by country," "hospitals in each province," "national parks by state").
+**Load skill:** `decompose-geographic-registries`
+**Key signal:** Geographic partitioning, "by country/state/region," registry or inventory language.
+
+### temporal-event-logs
+**Match when:** The query asks for a chronological log of discrete events, incidents, or occurrences (e.g., "all earthquakes above magnitude 6 since 2000," "product recall history," "timeline of policy changes").
+**Load skill:** `decompose-temporal-event-logs`
+**Key signal:** Event logs, incident histories, timelines of discrete occurrences (not continuous product releases — use split-by-time-period for those).
+
 ## Default Fallback
 If no type matches clearly, use general decomposition principles:
 - Split by entity or category to ensure data independence.
