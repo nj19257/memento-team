@@ -190,6 +190,11 @@ Example workboard format:
 
     async def close(self) -> None:
         """Close MCP connections and cleanup."""
+        if self._mcp_client is not None:
+            try:
+                await self._mcp_client.__aexit__(None, None, None)
+            except Exception:
+                pass
         self._mcp_client = None
         self._agent_graph = None
 
