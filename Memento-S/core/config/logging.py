@@ -23,7 +23,7 @@ def setup_logging(level: int | str = logging.INFO, log_file: str = None, console
     handlers: list[logging.Handler] = []
 
     if console_output:
-        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
         handlers.append(console_handler)
 

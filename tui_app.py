@@ -388,6 +388,8 @@ class MementoTeams(App):
         # Use env model if it matches a known option, otherwise default
         known_values = [v for _, v in MODEL_OPTIONS]
         self._selected_model: str = env_model if env_model in known_values else known_values[0]
+        env_worker_model = os.getenv("WORKER_MODEL", "")
+        self._selected_worker_model: str = env_worker_model if env_worker_model in known_values else self._selected_model
         self._session_worker_order: list[str] = []
         self._steps_filter_tool: str = ""
         self._steps_filter_subtask_id: str = ""
@@ -405,11 +407,19 @@ class MementoTeams(App):
                     yield TextArea("", id="task_input")
                     with Horizontal(id="model_row_compact"):
                         with Vertical(classes="compact_field"):
-                            yield Static("Model:", id="model_label")
+                            yield Static("Orchestrator:", id="model_label")
                             yield Select(
                                 [(label, value) for label, value in MODEL_OPTIONS],
                                 id="model_select",
                                 value=self._selected_model,
+                                allow_blank=False,
+                            )
+                        with Vertical(classes="compact_field"):
+                            yield Static("Worker:", id="worker_model_label")
+                            yield Select(
+                                [(label, value) for label, value in MODEL_OPTIONS],
+                                id="worker_model_select",
+                                value=self._selected_worker_model,
                                 allow_blank=False,
                             )
                         with Vertical(classes="compact_field"):
@@ -533,7 +543,7 @@ class MementoTeams(App):
                 temperature=0,
             )
             child_env = dict(os.environ)
-            child_env["OPENROUTER_MODEL"] = self._selected_model
+            child_env["OPENROUTER_MODEL"] = self._selected_worker_model
             if api_key:
                 child_env["OPENROUTER_API_KEY"] = api_key
             if self._serpapi_key:
@@ -655,7 +665,10 @@ class MementoTeams(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "model_select" and event.value != Select.BLANK:
             self._selected_model = str(event.value)
-            # Restart orchestrator with new model (only if not running a task)
+            if not self._task_running:
+                asyncio.create_task(self._start_orchestrator())
+        elif event.select.id == "worker_model_select" and event.value != Select.BLANK:
+            self._selected_worker_model = str(event.value)
             if not self._task_running:
                 asyncio.create_task(self._start_orchestrator())
         elif event.select.id == "example_select":

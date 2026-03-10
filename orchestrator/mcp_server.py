@@ -25,6 +25,48 @@ if QUIET_STDERR:
     # Suppress third-party startup banners/logs that can corrupt TUI rendering.
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+# ── Protect stdout for MCP JSON-RPC protocol ──────────────────────────
+# The MCP SDK uses sys.stdout.buffer (fd 1) for JSON-RPC communication.
+# Any stray writes to sys.stdout (from logging, print(), or third-party
+# libraries) corrupt the protocol stream and cause deadlocks because
+# they share the same BufferedWriter lock with the MCP SDK's TextIOWrapper.
+# Solution: replace sys.stdout with a proxy that sends writes to stderr
+# but keeps .buffer pointing to the real stdout buffer for MCP SDK.
+_real_stdout_buffer = sys.stdout.buffer
+
+
+class _StderrProxyStdout:
+    """Redirects all text writes to stderr, keeps .buffer for MCP SDK."""
+
+    def __init__(self, real_buffer, fallback):
+        self.buffer = real_buffer
+        self._fallback = fallback
+
+    def write(self, s):
+        return self._fallback.write(s)
+
+    def flush(self):
+        self._fallback.flush()
+
+    def fileno(self):
+        return self._fallback.fileno()
+
+    @property
+    def encoding(self):
+        return self._fallback.encoding
+
+    def isatty(self):
+        return self._fallback.isatty()
+
+    def readable(self):
+        return False
+
+    def writable(self):
+        return True
+
+
+sys.stdout = _StderrProxyStdout(_real_stdout_buffer, sys.stderr)
+
 # Bridge OPENROUTER env vars to new Memento-S LLM_* vars
 if os.getenv("OPENROUTER_API_KEY") and not os.getenv("LLM_API"):
     os.environ["LLM_API"] = "openrouter"
@@ -538,8 +580,8 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         _stderr_print(f"  [Worker {idx + 1}] Trajectory saved → {traj_path}")
                     return {
                         "subtask_index": idx,
-                        "subtask": subtask,
-                        "result": result,
+                        "subtask": subtask[:200],
+                        "result": result[:500] if result else "",
                         "time_taken_seconds": elapsed,
                     }
                 except Exception as e:
@@ -580,6 +622,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                 successful.append(result)
 
         # Summary
+        _log_to_file(f"execute_subtasks: asyncio.gather done — {len(successful)} ok, {len(failed)} failed")
         _stderr_print(f"\n{'=' * 80}")
         _stderr_print(f"[MementoSWorkerPool] All subtasks completed")
         _stderr_print(f"  Successful: {len(successful)}/{len(subtasks)}")
@@ -592,13 +635,28 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
             preview = r.get("result", "")[:200]
             _stderr_print(f"  Result {idx + 1} ({t}s): {preview}")
 
-        return {
+        # Read final workboard so orchestrator can synthesize from it
+        final_board = _workboard_read()
+
+        result_payload = {
             "results": successful,
             "failed": failed,
             "subtasks_count": len(subtasks),
+            "workboard": final_board,
         }
 
+        import json as _json
+        payload_str = _json.dumps(result_payload, ensure_ascii=False)
+        payload_size = len(payload_str)
+        _log_to_file(
+            f"execute_subtasks: payload built — {payload_size} bytes, "
+            f"{len(successful)} successful, {len(failed)} failed"
+        )
+        _log_to_file(f"execute_subtasks: about to return")
+        return result_payload
+
     except Exception as e:
+        _log_to_file(f"execute_subtasks: EXCEPTION — {type(e).__name__}: {e}")
         logger.error(
             f"[MementoSWorkerPool] Error: {type(e).__name__}: {e}", exc_info=True
         )
