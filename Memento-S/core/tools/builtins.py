@@ -350,6 +350,17 @@ async def edit_workboard_tool(tag: str, content: str) -> str:
     if not _workboard_path.exists():
         return "edit_workboard ERR: workboard file does not exist"
 
+    # Validate: reject content that looks like the full workboard template
+    other_tag_pattern = re.compile(r"<t\d+_(result|status)>")
+    other_tag_count = len(other_tag_pattern.findall(content))
+    if other_tag_count >= 2:
+        return (
+            f"edit_workboard ERR: Your content contains {other_tag_count} worker tags "
+            f"(e.g. <tN_result>). You are writing the ENTIRE workboard template "
+            f"into your tag. Only write YOUR data rows — not the full board. "
+            f"Re-read the workboard and try again with just your results."
+        )
+
     def _run() -> str:
         board = _workboard_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
         pattern = re.compile(

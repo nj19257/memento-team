@@ -14,7 +14,7 @@ Use this strategy when a query requires a comprehensive list of events, product 
 5. **Consolidate and Sort**: A final step must merge all worker outputs, remove potential duplicates at the segment boundaries, and sort the entire dataset chronologically.
 
 ## Worker Assignment Rules
-- **Density-Based Partitioning**: Limit each worker to a range expected to yield 15–20 records. If a single year is known to be "event-heavy," assign that year to its own worker.
+- **Density-Based Partitioning**: Limit each worker to a range expected to yield 10–20 records. If a single year is known to be "event-heavy," assign that year to its own worker. **Always prefer more workers with narrower ranges** — each worker has a limited tool call budget, so smaller scope = higher completeness.
 - **Overlap Handling**: Instruct workers to strictly adhere to `[Start Date, End Date]` boundaries to prevent double-counting or gaps.
 - **Verification Workers**: For high-precision tasks (e.g., financial data or legal records), assign a secondary worker to cross-verify a random 10% sample of the primary worker's findings.
 

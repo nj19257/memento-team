@@ -13,7 +13,7 @@ This strategy is ideal for queries requiring a comprehensive census or list of e
 4.  **Temporal/Constraint Alignment:** If the query specifies a time range (e.g., "Year X to Year Y") or a threshold (e.g., "Value > N"), include these constraints in every subtask definition to prevent workers from returning out-of-scope data.
 
 ## Worker Assignment Rules
-*   **Load Balancing:** Aim for 10–20 entities per worker. If a single category (e.g., "Category A") contains 50+ entities, further decompose that subtask by a secondary attribute (e.g., "Category A - Sub-group 1").
+*   **Load Balancing:** Aim for 10–20 entities per worker. If a single category (e.g., "Category A") contains 50+ entities, further decompose that subtask by a secondary attribute (e.g., "Category A - Sub-group 1"). **Always prefer more workers with narrower scope** — each worker has a limited tool call budget, so smaller scope = higher completeness.
 *   **Isolation:** Each worker should be responsible for the complete lifecycle of their assigned category—from discovery of the entity list to the retrieval of specific metadata.
 *   **Redundancy/Verification:** For high-precision tasks, assign a "Verification Worker" to cross-check 10% of the entries from each category against a second source.
 

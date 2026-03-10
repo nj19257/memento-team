@@ -18,7 +18,7 @@ Use this strategy when a query identifies a specific set of independent subjects
 5.  **Vertical Synthesis:** A final pass aggregates the independent rows into a single unified table, ensuring formatting (units, date formats) is synchronized.
 
 ## Worker Assignment Rules
-- **Batch Size:** Assign 3–5 complex entities per worker. For simpler entities (e.g., single-attribute lists), this can increase to 10.
+- **Batch Size:** Assign 3–5 complex entities per worker. For simpler entities (e.g., single-attribute lists), this can increase to 10. **Always prefer more workers with smaller batches** — each worker has a limited tool call budget, so smaller scope = higher completeness.
 - **Specialization:** If the entities span different sub-categories or eras, group them by similarity to allow the worker to maintain context.
 - **Verification:** For high-precision tasks (e.g., financial data or technical specs), assign a "Cross-Check" worker to verify 20% of the data points against primary sources.
 
