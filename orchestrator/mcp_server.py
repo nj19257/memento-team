@@ -493,7 +493,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                                 "3. Search each one separately — do NOT rely on a single summary page.\n"
                                 "4. Cross-check with a second source, then compile and write to workboard.\n\n"
                                 "## RULES\n"
-                                "- MAXIMUM 30 tool calls. Write to workboard BEFORE you run out.\n"
+                                "- MAXIMUM 60 tool calls. Write to workboard BEFORE you run out.\n"
                                 "- NEVER repeat the same search/fetch more than twice — skip and move on.\n"
                                 "- Incomplete results on workboard > perfect results that never get written.\n\n"
                                 f"```markdown\n{board_content}\n```"
@@ -504,8 +504,29 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         agent = MementoSAgent(workspace=WORKSPACE_DIR)
                         session_id = generate_session_id()
 
-                        record("worker_agent_invoke_start", subtask_id=subtask_id)
-                        result = await agent.reply(session_id, execution_text)
+                        worker_timeout = int(os.getenv("WORKER_TIMEOUT", "300"))
+                        record("worker_agent_invoke_start", subtask_id=subtask_id, timeout=worker_timeout)
+                        try:
+                            result = await asyncio.wait_for(
+                                agent.reply(session_id, execution_text),
+                                timeout=worker_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            elapsed_t = round(time.perf_counter() - start_time, 2)
+                            logger.warning(
+                                f"[MementoSWorkerPool] Subtask [{idx}] timed out after {worker_timeout}s"
+                            )
+                            record("worker_timeout", subtask_id=subtask_id, timeout=worker_timeout, elapsed=elapsed_t)
+                            # Read whatever the worker wrote to the workboard before timeout
+                            board = await _workboard_read()
+                            tag = f"{subtask_id}_result"
+                            partial = ""
+                            if board and tag in board:
+                                import re as _re
+                                m = _re.search(rf"<{tag}>(.*?)</{tag}>", board, _re.DOTALL)
+                                if m:
+                                    partial = m.group(1).strip()
+                            result = partial if partial else f"[TIMEOUT after {worker_timeout}s — partial results may be on workboard]"
                         result = result.strip()
                         record("worker_agent_invoke_end", subtask_id=subtask_id, result_preview=result[:500])
 
@@ -566,7 +587,7 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                         _save_trajectory(
                             idx,
                             subtask,
-                            [],
+                            trajectory,
                             error_msg,
                             elapsed,
                             status="failed",

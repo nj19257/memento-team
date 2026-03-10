@@ -28,9 +28,16 @@ from orchestrator.orchestrator_agent import OrchestratorAgent
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
 
-# Available models for the selector (label, value)
-# Values are exact OpenRouter model IDs — see https://openrouter.ai/models
-MODEL_OPTIONS: list[tuple[str, str]] = [
+# ---------------------------------------------------------------------------
+# LLM Provider presets
+# ---------------------------------------------------------------------------
+LLM_PROVIDERS: list[tuple[str, str]] = [
+    ("OpenRouter", "openrouter"),
+    ("Local (Kimi-K2.5)", "local"),
+]
+
+# Models available per provider
+OPENROUTER_MODEL_OPTIONS: list[tuple[str, str]] = [
     ("DeepSeek V3.2", "deepseek/deepseek-v3.2"),
     ("GPT-5.2", "openai/gpt-5.2"),
     ("GPT-5.1", "openai/gpt-5.1"),
@@ -44,6 +51,15 @@ MODEL_OPTIONS: list[tuple[str, str]] = [
     ("Claude Opus 4.6", "anthropic/claude-opus-4.6"),
     ("Claude Opus 4.5", "anthropic/claude-opus-4.5"),
 ]
+
+LOCAL_MODEL_OPTIONS: list[tuple[str, str]] = [
+    ("Kimi-K2.5", "Kimi-K2.5"),
+    ("Qwen3.5-397B-A17B", "Qwen3.5-397B-A17B"),
+    ("MiniMax-M2.5", "MiniMax-M2.5"),
+]
+
+# Backward compat alias
+MODEL_OPTIONS = OPENROUTER_MODEL_OPTIONS
 
 # ---------------------------------------------------------------------------
 # Workboard helpers (inline — no core.workboard module in this repo)
@@ -384,9 +400,16 @@ class MementoTeams(App):
         load_dotenv()
         self._openrouter_key: str = os.getenv("OPENROUTER_API_KEY", "")
         self._serpapi_key: str = os.getenv("SERPAPI_API_KEY", "")
-        env_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2")
-        # Use env model if it matches a known option, otherwise default
-        known_values = [v for _, v in MODEL_OPTIONS]
+        # Provider selection: "openrouter" or "local"
+        env_llm_api = (os.getenv("LLM_API") or "").lower()
+        self._selected_provider: str = "local" if env_llm_api == "openai" else "openrouter"
+        # Local API settings from env
+        self._local_api_base: str = os.getenv("OPENAI_API_BASE", "http://45.120.102.120:10027/v1")
+        self._local_api_key: str = os.getenv("OPENAI_API_KEY", "test-key-api")
+        # Model selection per provider
+        self._model_options = self._get_model_options()
+        env_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2") if self._selected_provider == "openrouter" else os.getenv("LLM_MODEL", "Kimi-K2.5")
+        known_values = [v for _, v in self._model_options]
         self._selected_model: str = env_model if env_model in known_values else known_values[0]
         env_worker_model = os.getenv("WORKER_MODEL", "")
         self._selected_worker_model: str = env_worker_model if env_worker_model in known_values else self._selected_model
@@ -398,6 +421,11 @@ class MementoTeams(App):
         self._orchestrator_start_error: str | None = None
         self._orchestrator_traj_path: Path | None = None
 
+    def _get_model_options(self) -> list[tuple[str, str]]:
+        if self._selected_provider == "local":
+            return LOCAL_MODEL_OPTIONS
+        return OPENROUTER_MODEL_OPTIONS
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="layout"):
@@ -407,9 +435,17 @@ class MementoTeams(App):
                     yield TextArea("", id="task_input")
                     with Horizontal(id="model_row_compact"):
                         with Vertical(classes="compact_field"):
+                            yield Static("Provider:", id="provider_label")
+                            yield Select(
+                                [(label, value) for label, value in LLM_PROVIDERS],
+                                id="provider_select",
+                                value=self._selected_provider,
+                                allow_blank=False,
+                            )
+                        with Vertical(classes="compact_field"):
                             yield Static("Orchestrator:", id="model_label")
                             yield Select(
-                                [(label, value) for label, value in MODEL_OPTIONS],
+                                [(label, value) for label, value in self._model_options],
                                 id="model_select",
                                 value=self._selected_model,
                                 allow_blank=False,
@@ -417,7 +453,7 @@ class MementoTeams(App):
                         with Vertical(classes="compact_field"):
                             yield Static("Worker:", id="worker_model_label")
                             yield Select(
-                                [(label, value) for label, value in MODEL_OPTIONS],
+                                [(label, value) for label, value in self._model_options],
                                 id="worker_model_select",
                                 value=self._selected_worker_model,
                                 allow_blank=False,
@@ -535,17 +571,41 @@ class MementoTeams(App):
                 await self.orchestrator.close()
                 self.orchestrator = None
             load_dotenv()
-            api_key = self._openrouter_key or os.getenv("OPENROUTER_API_KEY", "")
-            model = ChatOpenAI(
-                model=self._selected_model,
-                openai_api_key=api_key,
-                openai_api_base=os.getenv("OPENROUTER_BASE_URL"),
-                temperature=0,
-            )
             child_env = dict(os.environ)
-            child_env["OPENROUTER_MODEL"] = self._selected_worker_model
-            if api_key:
-                child_env["OPENROUTER_API_KEY"] = api_key
+            if self._selected_provider == "local":
+                # Local OpenAI-compatible API (e.g. Kimi-K2.5)
+                model = ChatOpenAI(
+                    model=self._selected_model,
+                    openai_api_key=self._local_api_key,
+                    openai_api_base=self._local_api_base,
+                    temperature=0,
+                )
+                child_env["LLM_API"] = "openai"
+                child_env["OPENAI_API_KEY"] = self._local_api_key
+                child_env["OPENAI_API_BASE"] = self._local_api_base
+                child_env["LLM_MODEL"] = self._selected_worker_model
+                child_env["LLM_MAX_TOKENS"] = os.getenv("LLM_MAX_TOKENS", "100000")
+                child_env["LLM_TEMPERATURE"] = os.getenv("LLM_TEMPERATURE", "0.7")
+                child_env["LLM_TIMEOUT"] = os.getenv("LLM_TIMEOUT", "300")
+                # Remove OpenRouter vars so mcp_server doesn't auto-map
+                child_env.pop("OPENROUTER_API_KEY", None)
+            else:
+                # OpenRouter
+                api_key = self._openrouter_key or os.getenv("OPENROUTER_API_KEY", "")
+                base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+                model = ChatOpenAI(
+                    model=self._selected_model,
+                    openai_api_key=api_key,
+                    openai_api_base=base_url,
+                    temperature=0,
+                )
+                child_env["OPENROUTER_MODEL"] = self._selected_worker_model
+                child_env["OPENROUTER_BASE_URL"] = base_url
+                if api_key:
+                    child_env["OPENROUTER_API_KEY"] = api_key
+                # Remove local LLM vars so mcp_server auto-maps from OPENROUTER_*
+                child_env.pop("LLM_API", None)
+                child_env.pop("LLM_MODEL", None)
             if self._serpapi_key:
                 child_env["SERPAPI_API_KEY"] = self._serpapi_key
             # Prevent MCP server stderr logs from corrupting Textual rendering.
@@ -662,7 +722,26 @@ class MementoTeams(App):
             if self._selected_worker_path is not None and self._selected_worker_path.exists():
                 self._load_worker_steps(self._selected_worker_path)
 
+    def _refresh_model_selects(self) -> None:
+        """Update model/worker selects when provider changes."""
+        self._model_options = self._get_model_options()
+        default = self._model_options[0][1]
+        self._selected_model = default
+        self._selected_worker_model = default
+        model_sel = self.query_one("#model_select", Select)
+        worker_sel = self.query_one("#worker_model_select", Select)
+        model_sel.set_options([(l, v) for l, v in self._model_options])
+        model_sel.value = default
+        worker_sel.set_options([(l, v) for l, v in self._model_options])
+        worker_sel.value = default
+
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "provider_select" and event.value != Select.BLANK:
+            self._selected_provider = str(event.value)
+            self._refresh_model_selects()
+            if not self._task_running:
+                asyncio.create_task(self._start_orchestrator())
+            return
         if event.select.id == "model_select" and event.value != Select.BLANK:
             self._selected_model = str(event.value)
             if not self._task_running:
