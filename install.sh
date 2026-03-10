@@ -173,8 +173,10 @@ setup_repository() {
     elif [ -d "$INSTALL_DIR/.git" ]; then
         log_info "Repository exists, updating..."
         cd "$INSTALL_DIR"
+        git fetch origin "$REPO_BRANCH"
+        git checkout "$REPO_BRANCH" 2>/dev/null || git checkout -b "$REPO_BRANCH" "origin/$REPO_BRANCH"
         git pull --rebase || log_warn "Git pull failed, continuing with existing code"
-        log_success "Repository updated at $INSTALL_DIR"
+        log_success "Repository updated at $INSTALL_DIR (branch: $REPO_BRANCH)"
     else
         log_info "Cloning repository to $INSTALL_DIR..."
         git clone --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
