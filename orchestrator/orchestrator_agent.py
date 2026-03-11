@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -186,8 +187,65 @@ Example workboard format:
 
     async def close(self) -> None:
         """Close MCP connections and cleanup."""
+        client = self._mcp_client
         self._mcp_client = None
         self._agent_graph = None
+
+        if client is None:
+            return
+
+        # MultiServerMCPClient (langchain-mcp-adapters >=0.1.0) no longer
+        # exposes close() or __aexit__.  Sessions are ephemeral and cleaned
+        # up after each get_tools() / session() call.  However, earlier
+        # versions may hold long-lived transports.  We attempt to clean up
+        # any lingering internal state defensively.
+        #
+        # 1. Try the documented close() if it exists (future-proof).
+        _close = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if callable(_close):
+            try:
+                ret = _close()
+                if asyncio.iscoroutine(ret) or asyncio.isfuture(ret):
+                    await ret
+            except Exception:
+                logger.debug("[Orchestrator] client.close() raised, ignoring", exc_info=True)
+            return
+
+        # 2. Fallback: walk internal session/transport maps and close them.
+        #    _sessions / _transports are implementation details; guard with try.
+        for attr_name in ("_sessions", "_server_sessions"):
+            sessions = getattr(client, attr_name, None)
+            if not isinstance(sessions, dict):
+                continue
+            for name, session in list(sessions.items()):
+                _exit = getattr(session, "__aexit__", None)
+                if callable(_exit):
+                    try:
+                        await _exit(None, None, None)
+                    except Exception:
+                        pass
+            sessions.clear()
+
+        for attr_name in ("_transports", "_server_transports"):
+            transports = getattr(client, attr_name, None)
+            if not isinstance(transports, dict):
+                continue
+            for name, transport in list(transports.items()):
+                _exit = getattr(transport, "__aexit__", None)
+                if callable(_exit):
+                    try:
+                        await _exit(None, None, None)
+                    except Exception:
+                        pass
+            transports.clear()
+
+    async def __aenter__(self) -> "OrchestratorAgent":
+        """Support ``async with OrchestratorAgent(...) as orch:`` usage."""
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.close()
 
     def _ensure_started(self) -> None:
         if self._agent_graph is None:

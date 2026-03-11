@@ -1,6 +1,7 @@
 """Orchestrator MCP Server — wraps Memento-S worker pool with workboard support."""
 
 import json
+import fcntl
 import os
 import re
 import asyncio
@@ -88,6 +89,80 @@ import logging
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = max(1, min(int(os.getenv("MAX_WORKERS", "10")), 100))
+
+# ---------------------------------------------------------------------------
+# Shared AppContext — pre-load heavy resources once for all workers
+# ---------------------------------------------------------------------------
+# MementoSAgent.__init__ calls create_app_context() which loads:
+#   - SkillLibrary (disk I/O + BM25 index + jieba tokenization)
+#   - EmbeddingStore (BAAI/bge-m3 ~568MB sentence-transformers model + ChromaDB)
+#   - CloudCatalog (file I/O + async embedding)
+#   - CrossEncoderReranker (another sentence-transformers model)
+#
+# Without sharing, N workers = N redundant copies of these multi-hundred-MB
+# resources.  We pre-initialize once at module load and inject into each worker.
+_shared_app_context = None
+_shared_app_context_lock = threading.Lock()
+
+
+def _get_shared_app_context():
+    """Lazily initialize and return the shared AppContext singleton."""
+    global _shared_app_context
+    if _shared_app_context is not None:
+        return _shared_app_context
+    with _shared_app_context_lock:
+        if _shared_app_context is not None:
+            return _shared_app_context
+        _stderr_print("  [WorkerPool] Pre-loading shared AppContext (embeddings, BM25, skills)...")
+        _log_to_file("Pre-loading shared AppContext")
+        start = time.perf_counter()
+        try:
+            from core.skills.provider.delta_skills.bootstrap import create_app_context
+            _shared_app_context = create_app_context(init_logging=False)
+            elapsed = round(time.perf_counter() - start, 2)
+            _stderr_print(f"  [WorkerPool] Shared AppContext ready in {elapsed}s")
+            _log_to_file(f"Shared AppContext ready in {elapsed}s")
+        except Exception as exc:
+            _stderr_print(f"  [WorkerPool] WARN: Failed to pre-load AppContext: {exc}")
+            _log_to_file(f"Failed to pre-load AppContext: {exc}")
+        return _shared_app_context
+
+
+def _create_worker_agent(workspace: Path) -> MementoSAgent:
+    """Create a MementoSAgent that reuses the shared AppContext.
+
+    If the shared context is available, we inject its components
+    into the agent to avoid redundant heavy initialization.
+    """
+    ctx = _get_shared_app_context()
+    if ctx is None:
+        # Fallback: let the agent do its own init
+        return MementoSAgent(workspace=workspace)
+
+    from core.llm import LLM
+    from core.skills.skill_manager import SkillManager
+    from core.skills.provider.delta_skill_provider import DeltaSkillsProvider
+    from core.tools.builtins import configure as configure_builtin_tools
+
+    llm = LLM()
+    skill_manager = SkillManager(
+        provider=DeltaSkillsProvider(app_context=ctx),
+    )
+    agent = MementoSAgent(
+        workspace=workspace,
+        llm=llm,
+        skill_manager=skill_manager,
+    )
+    # Point builtin tools at the shared library/catalog so route_skill etc. work
+    configure_builtin_tools(
+        workspace,
+        skill_library=ctx.library,
+        cloud_catalog=ctx.cloud_catalog,
+        skill_manager=skill_manager,
+    )
+    return agent
+
+
 WORKSPACE_DIR = (Path(_MEMENTO_S_DIR) / "workspace").resolve()
 WORKBOARD_PATH = WORKSPACE_DIR / ".workboard.md"
 ORCHESTRATOR_SKILLS_DIR = (Path(__file__).resolve().parent.parent / "orchestrator_skills").resolve()
@@ -118,63 +193,93 @@ mcp = FastMCP("MementoSWorkerPool")
 
 _semaphore = asyncio.Semaphore(MAX_POOL_SIZE)
 
+# ---------------------------------------------------------------------------
+# Workboard helpers — file-lock protected against concurrent worker access
+# ---------------------------------------------------------------------------
+_WORKBOARD_LOCK_PATH = WORKSPACE_DIR / ".workboard.lock"
+
+
+class _WorkboardFileLock:
+    """Context manager that acquires an exclusive flock on the workboard lock file.
+
+    This prevents concurrent workers (running in the same process via asyncio)
+    and any out-of-process writers from corrupting the workboard during
+    read-modify-write cycles.
+    """
+
+    def __enter__(self):
+        WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        self._fd = open(_WORKBOARD_LOCK_PATH, "w")
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        self._fd.close()
+        return False
+
 
 def _workboard_write(content: str) -> Path:
-    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    WORKBOARD_PATH.write_text(content, encoding="utf-8")
+    with _WorkboardFileLock():
+        WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        WORKBOARD_PATH.write_text(content, encoding="utf-8")
     return WORKBOARD_PATH
 
 
 def _workboard_read() -> str:
-    if not WORKBOARD_PATH.exists():
-        return "(no workboard exists)"
-    return WORKBOARD_PATH.read_text(encoding="utf-8")
+    with _WorkboardFileLock():
+        if not WORKBOARD_PATH.exists():
+            return "(no workboard exists)"
+        return WORKBOARD_PATH.read_text(encoding="utf-8")
 
 
 def _workboard_check_off_item(index_1_based: int) -> str:
-    if not WORKBOARD_PATH.exists():
-        return "check_off_item ERR: workboard does not exist"
-    content = WORKBOARD_PATH.read_text(encoding="utf-8")
-    pattern = re.compile(rf"^(\s*-\s)\[ \](\s+{index_1_based}\b)", re.MULTILINE)
-    new_content, n = pattern.subn(r"\1[x]\2", content, count=1)
-    if n == 0:
-        return f"check_off_item SKIP: item {index_1_based} not found or already checked"
-    WORKBOARD_PATH.write_text(new_content, encoding="utf-8")
+    with _WorkboardFileLock():
+        if not WORKBOARD_PATH.exists():
+            return "check_off_item ERR: workboard does not exist"
+        content = WORKBOARD_PATH.read_text(encoding="utf-8")
+        pattern = re.compile(rf"^(\s*-\s)\[ \](\s+{index_1_based}\b)", re.MULTILINE)
+        new_content, n = pattern.subn(r"\1[x]\2", content, count=1)
+        if n == 0:
+            return f"check_off_item SKIP: item {index_1_based} not found or already checked"
+        WORKBOARD_PATH.write_text(new_content, encoding="utf-8")
     return f"check_off_item OK: item {index_1_based}"
 
 
 def _workboard_append_result(index_1_based: int, text: str) -> str:
-    if not WORKBOARD_PATH.exists():
-        return "append_result ERR: workboard does not exist"
-    content = WORKBOARD_PATH.read_text(encoding="utf-8")
-    one_line = " ".join(str(text).split())[:200]
-    result_line = f"- Task {index_1_based}: {one_line}"
-    marker = "## Results"
-    marker_idx = content.find(marker)
-    if marker_idx == -1:
-        content = content.rstrip() + f"\n\n{marker}\n{result_line}\n"
-    else:
-        marker_line_end = content.find("\n", marker_idx)
-        if marker_line_end == -1:
-            content += f"\n{result_line}\n"
+    with _WorkboardFileLock():
+        if not WORKBOARD_PATH.exists():
+            return "append_result ERR: workboard does not exist"
+        content = WORKBOARD_PATH.read_text(encoding="utf-8")
+        one_line = " ".join(str(text).split())[:200]
+        result_line = f"- Task {index_1_based}: {one_line}"
+        marker = "## Results"
+        marker_idx = content.find(marker)
+        if marker_idx == -1:
+            content = content.rstrip() + f"\n\n{marker}\n{result_line}\n"
         else:
-            insert_pos = len(content)
-            next_section = content.find("\n##", marker_line_end + 1)
-            if next_section != -1:
-                insert_pos = next_section + 1
-            content = content[:insert_pos].rstrip() + f"\n{result_line}\n" + content[insert_pos:]
-    WORKBOARD_PATH.write_text(content, encoding="utf-8")
+            marker_line_end = content.find("\n", marker_idx)
+            if marker_line_end == -1:
+                content += f"\n{result_line}\n"
+            else:
+                insert_pos = len(content)
+                next_section = content.find("\n##", marker_line_end + 1)
+                if next_section != -1:
+                    insert_pos = next_section + 1
+                content = content[:insert_pos].rstrip() + f"\n{result_line}\n" + content[insert_pos:]
+        WORKBOARD_PATH.write_text(content, encoding="utf-8")
     return f"append_result OK: task {index_1_based}"
 
 
 def _workboard_uses_tag_protocol() -> bool:
-    if not WORKBOARD_PATH.exists():
-        return False
-    try:
-        text = WORKBOARD_PATH.read_text(encoding="utf-8")
-    except Exception:
-        return False
-    return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
+    with _WorkboardFileLock():
+        if not WORKBOARD_PATH.exists():
+            return False
+        try:
+            text = WORKBOARD_PATH.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        return bool(re.search(r"<t\d+_[A-Za-z0-9_:-]*>.*?</t\d+_[A-Za-z0-9_:-]*>", text, re.DOTALL))
 
 
 def _resolve_orchestrator_skill_dir(skill_name: str | None) -> Path | None:
@@ -535,8 +640,8 @@ async def execute_subtasks(subtasks: List[str], workboard: str = "") -> dict:
                             )
                         record("worker_prompt_built", subtask_id=subtask_id, prompt_preview=execution_text[:500])
 
-                        # Create a new MementoSAgent and run
-                        agent = MementoSAgent(workspace=WORKSPACE_DIR)
+                        # Create a worker agent reusing the shared AppContext
+                        agent = _create_worker_agent(WORKSPACE_DIR)
                         configure_workboard(WORKBOARD_PATH)
                         session_id = generate_session_id()
 

@@ -130,8 +130,18 @@ class MementoSAgent:
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.llm = llm if llm is not None else LLM()
-        _app_context = create_app_context(llm=self.llm)
-        self.skill_manager = skill_manager if skill_manager is not None else SkillManager(provider=DeltaSkillsProvider(app_context=_app_context))
+
+        # Only create a fresh AppContext when no skill_manager is injected.
+        # When callers (e.g. the orchestrator worker pool) pre-load a shared
+        # AppContext and inject skill_manager, we skip the expensive init
+        # (embeddings, BM25, ChromaDB) entirely.
+        if skill_manager is not None:
+            _app_context = None
+            self.skill_manager = skill_manager
+        else:
+            _app_context = create_app_context(llm=self.llm)
+            self.skill_manager = SkillManager(provider=DeltaSkillsProvider(app_context=_app_context))
+
         self.session_manager = session_manager if session_manager is not None else SessionManager(self.workspace)
         self.context_manager = context_manager if context_manager is not None else StatefulContextManager(
             workspace=self.workspace,
@@ -139,12 +149,17 @@ class MementoSAgent:
             session_manager=self.session_manager,
         )
         self.model = model
-        configure_builtin_tools(
-            self.workspace,
-            skill_library=_app_context.library,
-            cloud_catalog=_app_context.cloud_catalog,
-            skill_manager=self.skill_manager,
-        )
+
+        # configure_builtin_tools is called by the orchestrator's
+        # _create_worker_agent() when using a shared context.  Only
+        # call it here when we created our own AppContext.
+        if _app_context is not None:
+            configure_builtin_tools(
+                self.workspace,
+                skill_library=_app_context.library,
+                cloud_catalog=_app_context.cloud_catalog,
+                skill_manager=self.skill_manager,
+            )
 
     async def _llm_step(
         self,
